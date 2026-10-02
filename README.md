@@ -35,6 +35,8 @@ dotnet run --project Tests/TestRunner/TestRunner.csproj -c Debug
 dotnet publish Zion.csproj -c Release -o publish
 ```
 
-## Third-party components
+## License
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Zion's own code is released under the [MIT License](LICENSE).
+
+The bundled components keep their own licenses: sing-box is GPL-3.0-or-later, Wintun is distributed under its prebuilt binaries license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
