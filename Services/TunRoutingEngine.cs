@@ -853,6 +853,40 @@ public class TunRoutingEngine
             });
         }
 
+        // Trackers are blocked before the RU bypass: otherwise mc.yandex.ru and top-fwz1.mail.ru would match
+        // the .ru rule first and go out directly instead of being blocked.
+        if (blockTrackers)
+        {
+            var trackerDomains = new JsonArray
+            {
+                "google-analytics.com",
+                "analytics.google.com",
+                "googletagmanager.com",
+                "doubleclick.net",
+                "adservice.google.com",
+                "facebook.net",
+                "connect.facebook.net",
+                "mc.yandex.ru",
+                "top-fwz1.mail.ru",
+                "app-measurement.com",
+                "crashlytics.com",
+                "adjust.com",
+                "appsflyer.com"
+            };
+
+            routeRules.Add(new JsonObject
+            {
+                ["domain_suffix"] = trackerDomains,
+                ["action"] = "reject"
+            });
+
+            dnsRules.Add(new JsonObject
+            {
+                ["domain_suffix"] = trackerDomains.DeepClone(),
+                ["action"] = "reject"
+            });
+        }
+
         // 2. Comprehensive Domestic Domain Whitelist (Instant local routing for Russian resources)
         if (bypassDomesticRu)
         {
@@ -885,38 +919,6 @@ public class TunRoutingEngine
             {
                 ["network"] = "udp",
                 ["port"] = new JsonArray { 19302, 3478, 5349 },
-                ["action"] = "reject"
-            });
-        }
-
-        if (blockTrackers)
-        {
-            var trackerDomains = new JsonArray
-            {
-                "google-analytics.com",
-                "analytics.google.com",
-                "googletagmanager.com",
-                "doubleclick.net",
-                "adservice.google.com",
-                "facebook.net",
-                "connect.facebook.net",
-                "mc.yandex.ru",
-                "top-fwz1.mail.ru",
-                "app-measurement.com",
-                "crashlytics.com",
-                "adjust.com",
-                "appsflyer.com"
-            };
-
-            routeRules.Add(new JsonObject
-            {
-                ["domain_suffix"] = trackerDomains,
-                ["action"] = "reject"
-            });
-
-            dnsRules.Add(new JsonObject
-            {
-                ["domain_suffix"] = trackerDomains.DeepClone(),
                 ["action"] = "reject"
             });
         }

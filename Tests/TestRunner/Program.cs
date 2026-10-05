@@ -671,6 +671,16 @@ class Program
         var configTrackersOn = TunRoutingEngine.GenerateSingBoxConfig(proxy, blockTrackers: true);
         string routeTrackersOnStr = configTrackersOn["route"]?["rules"]?.ToJsonString() ?? "";
         Assert(routeTrackersOnStr.Contains("google-analytics.com") && routeTrackersOnStr.Contains("\"action\":\"reject\""), "Block Trackers ON generates tracker domain reject rule");
+
+        // 14.4 Together with the RU bypass the tracker block must come first, or ".ru" would let mc.yandex.ru through
+        var both = TunRoutingEngine.GenerateSingBoxConfig(proxy, bypassDomesticRu: true, blockTrackers: true);
+        foreach (string section in new[] { "route", "dns" })
+        {
+            var rules = both[section]!["rules"]!.AsArray().Select(r => r!.ToJsonString()).ToList();
+            int tracker = rules.FindIndex(r => r.Contains("mc.yandex.ru"));
+            int ru = rules.FindIndex(r => r.Contains("gosuslugi.ru"));
+            Assert(tracker >= 0 && ru >= 0 && tracker < ru, $"{section}: trackers are blocked before the RU bypass (tracker rule {tracker}, RU rule {ru})");
+        }
     }
 
     static void TestAutoStartAndFailover()
