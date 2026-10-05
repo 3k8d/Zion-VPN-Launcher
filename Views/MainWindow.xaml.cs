@@ -117,6 +117,11 @@ public partial class MainWindow : Window
     private static extern uint RegisterWindowMessage(string lpString);
 
     private uint _wmShowMe = 0;
+    private uint _wmTaskbarCreated = 0;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ChangeWindowMessageFilterEx(IntPtr hwnd, uint message, uint action, IntPtr changeFilterStruct);
+    private const uint MSGFLT_ALLOW = 1;
 
     protected override void OnSourceInitialized(EventArgs e)
     {
@@ -134,6 +139,12 @@ public partial class MainWindow : Window
             // Register single-instance wakeup message
             _wmShowMe = RegisterWindowMessage("ZION_SHOW_WINDOW_MESSAGE_2026");
 
+            // Explorer broadcasts this after it restarts; every tray icon has to be added again.
+            // Zion runs elevated and Explorer does not, so the message must be let through explicitly.
+            _wmTaskbarCreated = RegisterWindowMessage("TaskbarCreated");
+            if (_wmTaskbarCreated != 0)
+                ChangeWindowMessageFilterEx(_hwnd, _wmTaskbarCreated, MSGFLT_ALLOW, IntPtr.Zero);
+
             int useDarkMode = 1;
             DwmSetWindowAttribute(_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDarkMode, sizeof(int));
 
@@ -149,6 +160,12 @@ public partial class MainWindow : Window
             RestoreFromTray();
             SetForegroundWindow(_hwnd);
             handled = true;
+            return IntPtr.Zero;
+        }
+
+        if (_wmTaskbarCreated != 0 && (uint)msg == _wmTaskbarCreated)
+        {
+            if (!_isRealExit) AddTrayIcon();
             return IntPtr.Zero;
         }
 
@@ -222,7 +239,10 @@ public partial class MainWindow : Window
     {
         if (_hwnd == IntPtr.Zero) return;
 
+        // Called again after an Explorer restart: the previous icon handle is no longer shown
+        IntPtr oldIcon = _currentHIcon;
         _currentHIcon = GenerateTrayHIcon(_vm.IsConnected);
+        if (oldIcon != IntPtr.Zero) DestroyIcon(oldIcon);
 
         var nid = new NOTIFYICONDATA
         {
@@ -235,7 +255,9 @@ public partial class MainWindow : Window
             szTip = _vm.IsConnected ? "Zion • Туннель активен" : "Zion • Отключено"
         };
 
-        Shell_NotifyIcon(NIM_ADD, ref nid);
+        // If the icon somehow survived, adding fails - then just refresh it
+        if (!Shell_NotifyIcon(NIM_ADD, ref nid))
+            Shell_NotifyIcon(NIM_MODIFY, ref nid);
     }
 
     private void UpdateTrayIcon()
