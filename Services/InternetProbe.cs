@@ -1,8 +1,11 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace Zion.Services;
+
+/// <summary>A real (non-tunnel) network adapter: Windows name, IPv4 address, IPv4 DNS servers.</summary>
+public sealed record PhysicalAdapter(string Name, IPAddress Address, IReadOnlyList<IPAddress> DnsServers);
 
 /// <summary>
 /// Checks that go around the tunnel on purpose: a socket bound to the address of the real network
@@ -20,12 +23,15 @@ public static class InternetProbe
         new(IPAddress.Parse("9.9.9.9"), 443)
     };
 
-    private static readonly object _cacheLock = new();
-    private static IPAddress? _cachedAddress;
-    private static long _cachedAtTicks;
 
     /// <summary>IPv4 address of the adapter that holds the default gateway (never the tunnel).</summary>
-    public static IPAddress? FindPhysicalAddress()
+    public static IPAddress? FindPhysicalAddress() => FindPhysicalAdapter()?.Address;
+
+    /// <summary>
+    /// The real network adapter (the one with an IPv4 default gateway, never Zion's tunnel):
+    /// its Windows name (as the core expects it for binding), IPv4 address and DNS servers.
+    /// </summary>
+    public static PhysicalAdapter? FindPhysicalAdapter()
     {
         try
         {
@@ -39,28 +45,14 @@ public static class InternetProbe
                 if (!props.GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any))) continue;
 
                 var addr = props.UnicastAddresses.FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork);
-                if (addr != null) return addr.Address;
+                if (addr == null) continue;
+
+                var dns = props.DnsAddresses.Where(d => d.AddressFamily == AddressFamily.InterNetwork).ToList();
+                return new PhysicalAdapter(nic.Name, addr.Address, dns);
             }
         }
         catch { }
         return null;
-    }
-
-    /// <summary>
-    /// Address to bind to when a measurement has to go around Zion's tunnel, or null when the tunnel
-    /// is not up (then an ordinary socket already goes out directly).
-    /// Remembered for a few seconds: adapter enumeration is not free and pings come in batches.
-    /// </summary>
-    public static IPAddress? TunnelBypassAddressCached()
-    {
-        lock (_cacheLock)
-        {
-            long now = Environment.TickCount64;
-            if (_cachedAtTicks != 0 && now - _cachedAtTicks < 5000) return _cachedAddress;
-            _cachedAddress = IsTunnelUp() ? FindPhysicalAddress() : null;
-            _cachedAtTicks = now;
-            return _cachedAddress;
-        }
     }
 
     /// <summary>True while the sing-box tunnel adapter exists and is up.</summary>

@@ -578,38 +578,31 @@ public class MainViewModel : INotifyPropertyChanged
         set => SetField(ref _editingProxy, value);
     }
 
-    private readonly DispatcherTimer _livePingTimer = new() { Interval = TimeSpan.FromSeconds(10.0) };
-
     private void OnScreenChanged(AppScreen screen)
     {
-        if (screen == AppScreen.ServerList)
+        // Opening the list checks the servers, at most every few minutes (new servers right away)
+        if (screen == AppScreen.ServerList && IsAutoCheckDue())
         {
-            _ = RunLivePingOnceAsync();
-            if (!_livePingTimer.IsEnabled)
-            {
-                _livePingTimer.Start();
-            }
+            _ = CheckServersAsync();
         }
-        else
-        {
-            if (_livePingTimer.IsEnabled)
-            {
-                _livePingTimer.Stop();
-            }
-        }
-    }
-
-    private async Task RunLivePingOnceAsync()
-    {
-        if (Proxies.Count == 0) return;
-        var targets = Proxies.ToList();
-        var tasks = targets.Select(p => ProxyCheckerService.FastPingProxyAsync(p));
-        await Task.WhenAll(tasks);
     }
 
     public string EditFormTitle => EditingProxy != null ? "РЕДАКТИРОВАНИЕ СЕРВЕРА" : "ДОБАВЛЕНИЕ СЕРВЕРА";
 
+    /// <summary>The server form fills itself from this (null = a new server).</summary>
+    public event Action<ProxyItem?>? EditorRequested;
+
+    /// <summary>Opens the server form for an existing server, or empty for a new one.</summary>
+    public void OpenEditor(ProxyItem? proxy)
+    {
+        EditingProxy = proxy;
+        EditorRequested?.Invoke(proxy);
+        CurrentScreen = AppScreen.ServerEdit;
+    }
+
     public ICommand ToggleConnectionCommand { get; }
+    public ICommand ShowDashboardCommand { get; }
+    public ICommand AddServerCommand { get; }
     public ICommand OpenServerListCommand { get; }
     public ICommand NavigateToSettingsCommand { get; }
     public ICommand OpenSubscriptionsCommand { get; }
@@ -690,6 +683,8 @@ public class MainViewModel : INotifyPropertyChanged
         UpdateDnsOptionsSelection();
 
         ToggleConnectionCommand = new RelayCommand(async _ => await ToggleConnectionAsync(), _ => !IsConnecting);
+        ShowDashboardCommand = new RelayCommand(_ => CurrentScreen = AppScreen.Dashboard);
+        AddServerCommand = new RelayCommand(_ => OpenEditor(null));
         OpenServerListCommand = new RelayCommand(_ => CurrentScreen = AppScreen.ServerList);
         NavigateToSettingsCommand = new RelayCommand(_ => CurrentScreen = AppScreen.Settings);
         OpenSubscriptionsCommand = new RelayCommand(_ => CurrentScreen = AppScreen.Subscriptions);
@@ -710,13 +705,6 @@ public class MainViewModel : INotifyPropertyChanged
         });
 
         _timer.Tick += Timer_Tick;
-        _livePingTimer.Tick += async (_, _) =>
-        {
-            if (CurrentScreen == AppScreen.ServerList)
-            {
-                await RunLivePingOnceAsync();
-            }
-        };
 
         // Wire ConnectionController State Machine
         _controller.StateChanged += (state, err) =>
@@ -1083,10 +1071,27 @@ public class MainViewModel : INotifyPropertyChanged
                 return;
             }
 
-            var candidates = FailoverPlanner.OrderCandidates(failed, Proxies);
-            AddLog($"Автопереключение: «{failedName}» недоступен, кандидатов: {candidates.Count}.");
+            var candidates = FailoverPlanner.OrderCandidates(failed, Proxies, max: 8);
+            AddLog($"Автопереключение: «{failedName}» недоступен, проверяем кандидатов: {candidates.Count}.");
 
-            foreach (var next in candidates)
+            // Check the candidates for real first (a separate copy of the core, around the tunnel):
+            // a dead server is skipped at once instead of costing a whole connection attempt.
+            var checks = await Task.Run(() => ServerChecker.CheckAsync(candidates));
+            foreach (var r in checks) ApplyCheckResult(r);
+            var dead = checks.Where(r => r.Outcome == ServerCheckOutcome.NotWorking).Select(r => r.Server).ToHashSet();
+
+            // Fresh delays re-order the list (same country and favourites still come first); dead ones are left out
+            var attempts = FailoverPlanner.OrderCandidates(failed, candidates, max: candidates.Count)
+                                          .Where(c => !dead.Contains(c))
+                                          .ToList();
+            if (attempts.Count == 0 && candidates.Count > 0)
+            {
+                // Every candidate failed the check. Rather than trust that blindly, try the two best the usual way.
+                AddLog("Автопереключение: ни один кандидат не прошёл проверку, пробуем два лучших напрямую.");
+                attempts = candidates.Take(2).ToList();
+            }
+
+            foreach (var next in attempts)
             {
                 if (!_userWantsConnection) return;
 
@@ -1117,6 +1122,99 @@ public class MainViewModel : INotifyPropertyChanged
             _failoverInProgress = false;
             _lastFailoverFinishedUtc = DateTime.UtcNow;
             NotifyUiProperties();
+        }
+    }
+
+    // =========================================================================
+    // SERVER CHECK: a real page through every server (see ServerChecker)
+    // =========================================================================
+
+    private static readonly TimeSpan AutoCheckInterval = TimeSpan.FromMinutes(10);
+    private DateTime _lastFullCheckUtc = DateTime.MinValue;
+
+    // Servers that took part in a finished check: one that is not here yet (e.g. new from a subscription) is due
+    private readonly HashSet<ProxyItem> _checkedServers = new();
+
+    private bool _isCheckingServers;
+    /// <summary>The server list is being checked right now.</summary>
+    public bool IsCheckingServers
+    {
+        get => _isCheckingServers;
+        private set
+        {
+            if (SetField(ref _isCheckingServers, value)) CommandManager.InvalidateRequerySuggested();
+        }
+    }
+
+    private int _checkDone;
+    private int _checkTotal;
+    /// <summary>"12/47" while the list is being checked.</summary>
+    public string CheckProgressText => $"{_checkDone}/{_checkTotal}";
+
+    private bool IsAutoCheckDue() =>
+        !IsCheckingServers &&
+        (DateTime.UtcNow - _lastFullCheckUtc > AutoCheckInterval || Proxies.Any(p => !p.IsDivider && !_checkedServers.Contains(p)));
+
+    /// <summary>
+    /// Checks every server for real (see <see cref="ServerChecker"/>); each card is updated the moment
+    /// its result is in. One check at a time: a second request while one runs is ignored.
+    /// </summary>
+    public async Task CheckServersAsync()
+    {
+        if (IsCheckingServers) return;
+        var targets = Proxies.Where(p => !p.IsDivider).ToList();
+        if (targets.Count == 0) return;
+
+        _checkDone = 0;
+        _checkTotal = targets.Count;
+        OnPropertyChanged(nameof(CheckProgressText));
+        IsCheckingServers = true;
+        var dispatcher = Application.Current?.Dispatcher;
+        try
+        {
+            var results = await Task.Run(() => ServerChecker.CheckAsync(targets, r => dispatcher?.InvokeAsync(() =>
+            {
+                ApplyCheckResult(r);
+                _checkDone++;
+                OnPropertyChanged(nameof(CheckProgressText));
+            })));
+
+            foreach (var p in targets) _checkedServers.Add(p);
+            _checkedServers.RemoveWhere(p => !Proxies.Contains(p)); // servers deleted meanwhile
+            _lastFullCheckUtc = DateTime.UtcNow;
+
+            int working = results.Count(r => r.Outcome == ServerCheckOutcome.Working);
+            var unknown = results.Where(r => r.Outcome == ServerCheckOutcome.Unknown).ToList();
+            AddLog(unknown.Count == results.Count && results.Count > 0
+                ? $"Проверка серверов не удалась: {unknown[0].Detail}"
+                : $"Проверка серверов: работают {working} из {results.Count}.");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Проверка серверов не удалась: {ex.Message}");
+        }
+        finally
+        {
+            IsCheckingServers = false;
+        }
+    }
+
+    /// <summary>Puts a check result on the server's card. "Unknown" (the check could not run) changes nothing.</summary>
+    private static void ApplyCheckResult(ServerCheckResult r)
+    {
+        var p = r.Server;
+        switch (r.Outcome)
+        {
+            case ServerCheckOutcome.Working:
+                p.Status = ProxyStatus.Online;
+                p.PingMs = r.DelayMs;
+                p.WorkingAddress = r.Address; // the tunnel connects straight to it
+                break;
+            case ServerCheckOutcome.NotWorking:
+                p.Status = ProxyStatus.Offline;
+                p.PingMs = -1;
+                p.WorkingAddress = null;
+                break;
         }
     }
 

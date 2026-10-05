@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -64,6 +67,8 @@ class Program
         TestFavorites();
         TestServerListSections();
         TestQuicProtocols();
+        TestLocalEndpoints();
+        TestServerChecker();
 
         Console.WriteLine("\n=======================================================");
         Console.WriteLine($"RESULTS: {_passed} Passed, {_failed} Failed");
@@ -340,6 +345,7 @@ class Program
             Password = "oldpass",
             PingMs = 70,
             Status = ProxyStatus.Online,
+            WorkingAddress = "5.6.7.8",
             IsFromSubscription = true,
             SubscriptionUrl = "https://example.com/sub"
         };
@@ -390,7 +396,9 @@ class Program
         var m2 = currentList.FirstOrDefault(p => p.Name == "Finland #2");
         Assert(m2 != null && m2.Id == existing2.Id, "Tier 2: Preserved ID by Name");
         Assert(m2 != null && m2.Password == "newpass", "Tier 2: Updated credentials from subscription");
-        Assert(m2 != null && m2.PingMs == 70, "Tier 2: Preserved existing PingMs metric");
+        // Its address changed (5.6.7.8 -> 5.6.7.9): the old check result and pinned address described the old server
+        Assert(m2 != null && m2.PingMs == -1 && m2.Status == ProxyStatus.Unknown && m2.WorkingAddress == null,
+            "Tier 2: A server that moved loses the old check result and pinned address");
 
         var m3 = currentList.FirstOrDefault(p => p.Name == "Netherlands #3");
         Assert(m3 != null && m3.Host == "9.9.9.9", "New server correctly added");
@@ -455,7 +463,7 @@ class Program
 
         foreach (var (name, proxy) in testProtocols)
         {
-            var config = TunRoutingEngine.GenerateSingBoxConfig(proxy, bypassTorrents: true, bypassDomesticRu: true, clashSecret: "test-secret", dnsProvider: DnsProvider.Auto);
+            var config = TunRoutingEngine.GenerateSingBoxConfig(proxy, bypassTorrents: true, bypassDomesticRu: true, dnsProvider: DnsProvider.Auto);
             string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
 
             Assert(config["route"]?["rules"] is JsonArray, $"{name}: Route rules present");
@@ -1131,11 +1139,6 @@ class Program
         Assert(TunRoutingEngine.HysteriaPortRanges("443, 20000-30000, bad, 70000, 5-1").SequenceEqual(new[] { "443:443", "20000:30000" }),
             "Invalid ports and ranges are dropped");
 
-        // UDP servers are not marked offline by a TCP check
-        var udpCheck = new ProxyItem { Protocol = ProxyProtocol.Hysteria2, Host = "127.0.0.1", Port = 1, Status = ProxyStatus.Online };
-        ProxyCheckerService.FastPingProxyAsync(udpCheck).GetAwaiter().GetResult();
-        Assert(udpCheck.Status == ProxyStatus.Unknown, "A Hysteria2 server is not marked offline by the TCP check");
-
         foreach (var (label, p) in new[] { ("Hysteria2", hy), ("Hysteria2 without extras", hyPlain!), ("TUIC", tuic) })
         {
             if (!File.Exists(TunRoutingEngine.SingBoxExePath)) break;
@@ -1156,6 +1159,278 @@ class Program
         }
     }
 
+    // ---- helpers for tests that run the real core (no TUN, no admin rights needed) ----
+
+    /// <summary>Starts sing-box with a config passed through stdin (as Zion's server check does).</summary>
+    static Process StartCore(JsonObject config)
+    {
+        var psi = new ProcessStartInfo(TunRoutingEngine.SingBoxExePath, "run -c stdin")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            StandardInputEncoding = new UTF8Encoding(false)
+        };
+        var process = Process.Start(psi)!;
+        process.StandardInput.Write(config.ToJsonString());
+        process.StandardInput.Close();
+        return process;
+    }
+
+    static bool WaitForPort(int port, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            try { using var c = new TcpClient(); c.Connect(IPAddress.Loopback, port); return true; }
+            catch { Thread.Sleep(50); }
+        }
+        return false;
+    }
+
+    /// <summary>A proxy setting that never skips the proxy (the stock WebProxy always bypasses loopback).</summary>
+    sealed class AlwaysProxy : IWebProxy
+    {
+        public AlwaysProxy(Uri proxy) => Proxy = proxy;
+        public Uri Proxy { get; }
+        public ICredentials? Credentials { get; set; }
+        public Uri GetProxy(Uri destination) => Proxy;
+        public bool IsBypassed(Uri host) => false;
+    }
+
+    static void TestLocalEndpoints()
+    {
+        Console.WriteLine("\n--- 29. Local ports and the locked SOCKS entry ---");
+
+        var a = LocalEndpoints.Create();
+        var b = LocalEndpoints.Create();
+        Assert(a.ControlPort > 0 && a.SocksPort > 0 && a.ControlPort != a.SocksPort, "Control API and SOCKS get two different free ports");
+        Assert(a.ControlSecret != b.ControlSecret && a.SocksPassword != b.SocksPassword && a.SocksPassword.Length == 32, "Every session gets fresh random secrets");
+        Assert(!a.ToString().Contains(a.SocksPassword) && !a.ToString().Contains(a.ControlSecret), "Credentials never show up in logs");
+        Assert(LocalEndpoints.IsPortConflict("start service: listen tcp 127.0.0.1:9090: bind: Only one usage of each socket address") &&
+               !LocalEndpoints.IsPortConflict("create service: initialize outbound[1]: unknown method"), "A port taken by another program is recognised");
+
+        var cfg = TunRoutingEngine.GenerateSingBoxConfig(new ProxyItem { Protocol = ProxyProtocol.Trojan, Host = "203.0.113.9", Port = 443, Password = "p", Sni = "example.com" }, local: a);
+        var inbounds = cfg["inbounds"]!.AsArray();
+        var socks = inbounds.First(i => i!["tag"]!.GetValue<string>() == "socks-in")!;
+        Assert(socks["type"]!.GetValue<string>() == "socks" && socks["listen"]!.GetValue<string>() == "127.0.0.1" && socks["listen_port"]!.GetValue<int>() == a.SocksPort,
+            "SOCKS entry: loopback only, on the session's port");
+        Assert(socks["users"]![0]!["username"]!.GetValue<string>() == a.SocksUser && socks["users"]![0]!["password"]!.GetValue<string>() == a.SocksPassword,
+            "SOCKS entry requires the session's login");
+        Assert(inbounds.All(i => i!["type"]!.GetValue<string>() is "tun" or "socks"), "No open HTTP/SOCKS entry is left");
+        var api = cfg["experimental"]!["clash_api"]!;
+        Assert(api["external_controller"]!.GetValue<string>() == $"127.0.0.1:{a.ControlPort}" && api["secret"]!.GetValue<string>() == a.ControlSecret,
+            "Control API: loopback, the session's port and secret");
+
+        byte[] login = DohProbe.BuildSocksLogin("user", "pässword");
+        Assert(login[0] == 1 && login[1] == 4 && login[6] == Encoding.UTF8.GetByteCount("pässword"), "Login request follows RFC 1929");
+
+        if (!File.Exists(TunRoutingEngine.SingBoxExePath)) return;
+
+        // The real core with a locked SOCKS entry in front of two local servers: no internet needed
+        var echo = new TcpListener(IPAddress.Loopback, 0);
+        echo.Start();
+        int echoPort = ((IPEndPoint)echo.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await echo.AcceptTcpClientAsync(); } catch { return; }
+                _ = Task.Run(async () =>
+                {
+                    using (c)
+                    {
+                        var st = c.GetStream();
+                        var buf = new byte[1024];
+                        int n;
+                        try { while ((n = await st.ReadAsync(buf)) > 0) await st.WriteAsync(buf.AsMemory(0, n)); } catch { }
+                    }
+                });
+            }
+        });
+
+        var web = new TcpListener(IPAddress.Loopback, 0);
+        web.Start();
+        int webPort = ((IPEndPoint)web.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await web.AcceptTcpClientAsync(); } catch { return; }
+                using (c)
+                {
+                    var st = c.GetStream();
+                    var buf = new byte[4096];
+                    try
+                    {
+                        await st.ReadAsync(buf);
+                        await st.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nzion"));
+                    }
+                    catch { }
+                }
+            }
+        });
+
+        var local = LocalEndpoints.Create();
+        var core = StartCore(new JsonObject
+        {
+            ["log"] = new JsonObject { ["disabled"] = true },
+            ["inbounds"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "socks", ["tag"] = "socks-in", ["listen"] = "127.0.0.1", ["listen_port"] = local.SocksPort,
+                    ["users"] = new JsonArray { new JsonObject { ["username"] = local.SocksUser, ["password"] = local.SocksPassword } }
+                }
+            },
+            ["outbounds"] = new JsonArray { new JsonObject { ["type"] = "direct", ["tag"] = "direct" } },
+            ["route"] = new JsonObject { ["final"] = "direct" }
+        });
+        try
+        {
+            Assert(WaitForPort(local.SocksPort, 5000), "The core opened the SOCKS entry");
+
+            string echoed = "";
+            try
+            {
+                using var tcp = new TcpClient();
+                tcp.Connect(IPAddress.Loopback, local.SocksPort);
+                var st = tcp.GetStream();
+                DohProbe.Socks5ConnectAsync(st, IPAddress.Loopback, echoPort, local.SocksUser, local.SocksPassword, CancellationToken.None).GetAwaiter().GetResult();
+                st.Write(Encoding.ASCII.GetBytes("ping"));
+                var buf = new byte[4];
+                int got = 0;
+                while (got < 4) got += st.Read(buf, got, 4 - got);
+                echoed = Encoding.ASCII.GetString(buf);
+            }
+            catch (Exception ex) { echoed = ex.Message; }
+            Assert(echoed == "ping", $"With the session login the entry passes traffic (got '{echoed}')");
+
+            bool wrongRefused = false;
+            try
+            {
+                using var tcp = new TcpClient();
+                tcp.Connect(IPAddress.Loopback, local.SocksPort);
+                DohProbe.Socks5ConnectAsync(tcp.GetStream(), IPAddress.Loopback, echoPort, local.SocksUser, "wrong-password", CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception) { wrongRefused = true; }
+            Assert(wrongRefused, "A wrong password is refused");
+
+            byte[] reply = new byte[2];
+            try
+            {
+                using var tcp = new TcpClient();
+                tcp.Connect(IPAddress.Loopback, local.SocksPort);
+                var st = tcp.GetStream();
+                st.Write(new byte[] { 5, 1, 0 }); // what any other program would try: no login
+                int got = 0;
+                while (got < 2) { int n = st.Read(reply, got, 2 - got); if (n == 0) break; got += n; }
+            }
+            catch { }
+            Assert(reply[1] == 0xFF, $"Without a login the entry accepts no one (method answer {reply[1]:X2})");
+
+            // The subscription download path: .NET's own SOCKS client with the session login
+            string body;
+            using (var withLogin = new HttpClient(new SocketsHttpHandler { Proxy = new AlwaysProxy(new Uri($"socks5://127.0.0.1:{local.SocksPort}")) { Credentials = local.SocksCredential } }) { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                try { body = withLogin.GetStringAsync($"http://127.0.0.1:{webPort}/").GetAwaiter().GetResult(); }
+                catch (Exception ex) { body = ex.Message; }
+            }
+            Assert(body == "zion", $"Subscription downloads log in to the entry (got '{body}')");
+
+            bool anonymousRefused;
+            using (var noLogin = new HttpClient(new SocketsHttpHandler { Proxy = new AlwaysProxy(new Uri($"socks5://127.0.0.1:{local.SocksPort}")) }) { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                try { noLogin.GetStringAsync($"http://127.0.0.1:{webPort}/").GetAwaiter().GetResult(); anonymousRefused = false; }
+                catch { anonymousRefused = true; }
+            }
+            Assert(anonymousRefused, "Another program without the login cannot use the entry");
+        }
+        finally
+        {
+            try { core.Kill(true); } catch { }
+            echo.Stop();
+            web.Stop();
+        }
+    }
+
+    static void TestServerChecker()
+    {
+        Console.WriteLine("\n--- 30. Real server check ---");
+
+        // An outbound can dial one exact address while the name still goes into TLS
+        var named = new ProxyItem { Protocol = ProxyProtocol.Vless, Host = "vpn.example.net", Port = 443, Uuid = Guid.NewGuid().ToString(), Security = "tls", Fingerprint = "chrome" };
+        var pinned = TunRoutingEngine.BuildProxyOutbound(named, "x", "203.0.113.7");
+        Assert(pinned["server"]!.GetValue<string>() == "203.0.113.7" && pinned["tls"]!["server_name"]!.GetValue<string>() == "vpn.example.net",
+            "Pinned address is dialled, the server name still goes into TLS");
+        Assert(TunRoutingEngine.BuildProxyOutbound(named, "x")["server"]!.GetValue<string>() == "vpn.example.net", "Without a pin the name is resolved as usual");
+        var hyPinned = TunRoutingEngine.BuildProxyOutbound(new ProxyItem { Protocol = ProxyProtocol.Hysteria2, Host = "hy.example.net", Port = 443, Password = "p" }, "h", "203.0.113.8");
+        Assert(hyPinned["server"]!.GetValue<string>() == "203.0.113.8" && hyPinned["tls"]!["server_name"]!.GetValue<string>() == "hy.example.net", "The same for Hysteria2");
+
+        var tunnel = TunRoutingEngine.GenerateSingBoxConfig(named, serverAddress: "203.0.113.7");
+        Assert(tunnel["outbounds"]![0]!["server"]!.GetValue<string>() == "203.0.113.7", "The tunnel connects to the address the check found working");
+        Assert(tunnel["route"]!["rules"]!.ToJsonString().Contains("203.0.113.7/32"), "Traffic to that address itself never loops into the tunnel");
+
+        // The check's own config
+        var socks = new ProxyItem { Protocol = ProxyProtocol.Socks5, Host = "198.51.100.1", Port = 1080 };
+        var targets = new List<ServerChecker.Target> { new(named, "203.0.113.7"), new(named, "203.0.113.8"), new(socks, null) };
+        var bound = ServerChecker.BuildConfig(targets, 40000, "sec", "Ethernet", new[] { IPAddress.Parse("192.168.0.1") });
+        var outbounds = bound["outbounds"]!.AsArray();
+        Assert(outbounds.Count == 4 && outbounds[0]!["tag"]!.GetValue<string>() == "s0" && outbounds[2]!["tag"]!.GetValue<string>() == "s2" &&
+               outbounds[3]!["type"]!.GetValue<string>() == "direct", "One outbound per address, tagged by position");
+        Assert(outbounds[1]!["server"]!.GetValue<string>() == "203.0.113.8", "Each address of a name is checked on its own");
+        Assert(bound["route"]!["default_interface"]!.GetValue<string>() == "Ethernet", "While the tunnel is up the check goes around it");
+        var dns = bound["dns"]!["servers"]![0]!;
+        Assert(dns["type"]!.GetValue<string>() == "udp" && dns["server"]!.GetValue<string>() == "192.168.0.1", "Names are asked at the real adapter's DNS server");
+        Assert(bound["inbounds"] == null, "The check opens no entry points");
+        var unbound = ServerChecker.BuildConfig(targets, 40000, "sec", null, Array.Empty<IPAddress>());
+        Assert(unbound["route"]!["default_interface"] == null && unbound["dns"]!["servers"]![0]!["type"]!.GetValue<string>() == "local",
+            "Without a tunnel: no binding, the system's DNS");
+
+        // What the core says
+        Assert(ServerChecker.ParseBadOutbound("create service: initialize outbound[2]: invalid public_key") == 2, "The core names the server it refuses");
+        Assert(ServerChecker.ParseBadOutbound("start service: something else") == null, "No index when the core names none");
+        Assert(ServerChecker.CleanCoreError("\u001b[31mFATAL\u001b[0m[0000] create service: initialize outbound[1]: unknown method: bogus") ==
+               "create service: initialize outbound[1]: unknown method: bogus", "Core errors lose colour codes and the level prefix");
+        var (status, addresses) = ClashApiClient.ParseDnsAnswer(
+            "{\"Answer\":[{\"TTL\":60,\"data\":\"203.0.113.1\",\"name\":\"a.\",\"type\":1},{\"TTL\":60,\"data\":\"b.\",\"name\":\"a.\",\"type\":5}," +
+            "{\"TTL\":60,\"data\":\"203.0.113.2\",\"name\":\"a.\",\"type\":1}],\"Status\":0}");
+        Assert(status == 0 && addresses.Count == 2 && addresses[1].ToString() == "203.0.113.2", "DNS answers: only IPv4 addresses are taken");
+        Assert(ClashApiClient.ParseDnsAnswer("{\"Status\":3}").Status == 3, "\"No such name\" is recognised");
+
+        if (!File.Exists(TunRoutingEngine.SingBoxExePath)) return;
+
+        string tmp = Path.Combine(Path.GetTempPath(), $"singbox_check_{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(tmp, bound.ToJsonString());
+            var psi = new ProcessStartInfo(TunRoutingEngine.SingBoxExePath, $"check -c \"{tmp}\"")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi)!;
+            string err = proc.StandardError.ReadToEnd() + proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit();
+            Assert(proc.ExitCode == 0, "Native sing-box check passes for the server check config", err);
+        }
+        finally { try { File.Delete(tmp); } catch { } }
+
+        // End to end without internet: a server the core refuses, one that refuses connections, a divider
+        var refusedByCore = new ProxyItem { Name = "bad", Protocol = ProxyProtocol.Vless, Host = "203.0.113.20", Port = 443, Uuid = Guid.NewGuid().ToString(), Security = "reality", PublicKey = "", Sni = "example.com" };
+        var closedPort = new ProxyItem { Name = "closed", Protocol = ProxyProtocol.Socks5, Host = "127.0.0.1", Port = LocalEndpoints.FreeLoopbackPort() };
+        var divider = new ProxyItem { Name = "❗️Белые списки ниже", Host = "127.0.0.1", Port = 1 };
+        var reported = new List<ServerCheckResult>();
+        var results = ServerChecker.CheckAsync(new[] { refusedByCore, closedPort, divider }, r => { lock (reported) reported.Add(r); }).GetAwaiter().GetResult();
+        Assert(results.Count == 2 && results.All(r => r.Server != divider), "Dividers are not checked");
+        Assert(reported.Count == results.Count, "Every result is reported as soon as it is known");
+        var bad = results.First(r => r.Server == refusedByCore);
+        Assert(bad.Outcome == ServerCheckOutcome.NotWorking && bad.Detail.Contains("public_key"), $"A server the core refuses is named, the rest are still checked ({bad.Detail})");
+        Assert(results.First(r => r.Server == closedPort).Outcome == ServerCheckOutcome.NotWorking, "A server that refuses connections is not working");
+        Assert(ServerChecker.CheckAsync(Array.Empty<ProxyItem>()).GetAwaiter().GetResult().Count == 0, "Nothing to check, nothing started");
+    }
+
     static void TestFavorites()
     {
         Console.WriteLine("\n--- 26. Favourite servers ---");
@@ -1163,9 +1438,10 @@ class Program
 
         // List order: favourites first, the saved order kept inside each group
         var a = S("🇩🇪 a"); var b = S("🇳🇱 b", fav: true); var c = S("🇫🇮 c"); var d = S("🇺🇸 d", fav: true);
-        var shown = ServerListViewModel.FavoritesFirst(new[] { a, b, c, d });
+        var shown = ServerListViewModel.BuildSections(new[] { a, b, c, d }, new List<SubscriptionEntry>()).SelectMany(s => s.Members).ToList();
         Assert(shown.SequenceEqual(new[] { b, d, a, c }), "Favourites come first, saved order kept inside each group");
-        Assert(ServerListViewModel.FavoritesFirst(new[] { a, c }).SequenceEqual(new[] { a, c }), "Without favourites the order is unchanged");
+        var noFavourites = ServerListViewModel.BuildSections(new[] { a, c }, new List<SubscriptionEntry>()).SelectMany(s => s.Members);
+        Assert(noFavourites.SequenceEqual(new[] { a, c }), "Without favourites the order is unchanged");
 
         // Failover: same country still wins, then favourites, then ping
         var cur = S("🇩🇪 current");
@@ -1428,7 +1704,7 @@ class Program
         Assert(existingList.Count == 2, $"Merge trimmed obsolete and updated list to 2 items (got {existingList.Count})");
         var updatedServer2 = existingList.FirstOrDefault(p => p.Host == "5.6.7.8");
         Assert(updatedServer2 != null, "Server 2 exists after merge");
-        Assert(updatedServer2.PingMs == 45, "Server 2 preserved PingMs");
+        Assert(updatedServer2!.PingMs == 45, "Server 2 preserved PingMs");
 
         var newServer3 = existingList.FirstOrDefault(p => p.Host == "pt-nl.example.net");
         Assert(newServer3 != null, "Server 3 added from subscription");

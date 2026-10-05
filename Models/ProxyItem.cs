@@ -17,7 +17,6 @@ public class ProxyItem : INotifyPropertyChanged
     private ProxyStatus _status = ProxyStatus.Unknown;
     private int _pingMs = -1;
     private string _country = "";
-    private DateTime? _lastChecked;
     private bool _isSelected;
     private bool _isFromSubscription;
     private string _subscriptionUrl = "";
@@ -96,29 +95,30 @@ public class ProxyItem : INotifyPropertyChanged
         set => SetField(ref _password, value);
     }
 
+    // Status and PingMs come from the server check (see ServerChecker): they describe
+    // this run only and are not saved, so an old result is never shown as current after a restart.
+    [JsonIgnore]
     public ProxyStatus Status
     {
         get => _status;
-        set
-        {
-            if (SetField(ref _status, value))
-            {
-                OnPropertyChanged(nameof(StatusText));
-            }
-        }
+        set => SetField(ref _status, value);
     }
 
+    /// <summary>Delay of the last successful check in ms (a real page through the server), -1 if unknown.</summary>
+    [JsonIgnore]
     public int PingMs
     {
         get => _pingMs;
-        set
-        {
-            if (SetField(ref _pingMs, value))
-            {
-                OnPropertyChanged(nameof(PingDisplay));
-            }
-        }
+        set => SetField(ref _pingMs, value);
     }
+
+    /// <summary>
+    /// The address that passed the last check. A server name often stands for several addresses and some
+    /// of them may be dead or blocked, so the tunnel connects to this one directly (the name still goes
+    /// into the TLS handshake). Null: resolve the name as usual.
+    /// </summary>
+    [JsonIgnore]
+    public string? WorkingAddress { get; set; }
 
     public string Country
     {
@@ -132,12 +132,6 @@ public class ProxyItem : INotifyPropertyChanged
                 OnPropertyChanged(nameof(LocationShort));
             }
         }
-    }
-
-    public DateTime? LastChecked
-    {
-        get => _lastChecked;
-        set => SetField(ref _lastChecked, value);
     }
 
     public bool IsFromSubscription
@@ -350,19 +344,6 @@ public class ProxyItem : INotifyPropertyChanged
             };
         }
     }
-
-    [JsonIgnore]
-    public string PingDisplay => PingMs >= 0 ? $"{PingMs} ms" : "—";
-
-    [JsonIgnore]
-    public string StatusText => Status switch
-    {
-        ProxyStatus.Online => "Онлайн",
-        ProxyStatus.Offline => "Недоступен",
-        ProxyStatus.AuthError => "Ошибка входа",
-        ProxyStatus.Testing => "Проверка...",
-        _ => "Не проверен"
-    };
 
     [JsonIgnore]
     public string CleanCountryName

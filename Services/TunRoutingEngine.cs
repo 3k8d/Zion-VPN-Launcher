@@ -17,7 +17,21 @@ public record DnsBenchmarkResult(string Name, string ServerIp, string Path, int 
 public class TunRoutingEngine
 {
     public bool IsActive { get; private set; } = false;
-    public string CurrentClashSecret { get; private set; } = "";
+
+    /// <summary>
+    /// The last start failed because the server passed no traffic (the core itself came up fine).
+    /// Only then is it worth checking the server's other addresses.
+    /// </summary>
+    public bool LastStartServerUnreachable { get; private set; }
+
+    /// <summary>This session's control API and SOCKS entry: fresh free ports and credentials for every start.</summary>
+    public LocalEndpoints? Local { get; private set; }
+
+    /// <summary>
+    /// The running tunnel's endpoints, for code that has no engine at hand (subscription downloads).
+    /// Null while no tunnel is up.
+    /// </summary>
+    public static LocalEndpoints? ActiveLocal { get; private set; }
 
     /// <summary>Name of the DNS server the running tunnel uses (e.g. "Cloudflare").</summary>
     public string ActiveDnsName { get; private set; } = "";
@@ -356,13 +370,15 @@ public class TunRoutingEngine
         CancellationToken cancellationToken = default,
         IReadOnlyCollection<string>? directApps = null,
         DohTarget? preferredDns = null,
-        IReadOnlyCollection<string>? directSites = null)
+        IReadOnlyCollection<string>? directSites = null,
+        string? serverAddress = null)
     {
         await _syncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             StopInternal();
             _activeSessionId = sessionId != Guid.Empty ? sessionId : Guid.NewGuid();
+            LastStartServerUnreachable = false;
 
             var (coreOk, coreErr) = EnsureCoreFiles();
             if (!coreOk)
@@ -371,10 +387,7 @@ public class TunRoutingEngine
             }
             EnsureRuntimeDirectorySecurity();
 
-            // 1. Generate unique session secret for Clash API protection
-            CurrentClashSecret = Guid.NewGuid().ToString("N");
-
-            // 2. Which DNS server goes first
+            // 1. Which DNS server goes first
             List<DnsBenchmarkResult>? autoDnsOrder = null;
             if (preferredDns != null)
             {
@@ -402,204 +415,44 @@ public class TunRoutingEngine
             ActiveDnsTarget = ResolvePrimaryDns(dnsProvider, autoDnsOrder);
             ActiveDnsName = ActiveDnsTarget.Name;
 
-            // 3. Generate configuration with optimized DNS provider order and security flags
-            var config = GenerateSingBoxConfig(proxy, bypassTorrents, bypassDomesticRu, CurrentClashSecret, dnsProvider, autoDnsOrder, blockQuic, blockWebRtc, blockTrackers, directApps, directSites);
             if (directApps is { Count: > 0 })
             {
                 OnLog?.Invoke($"Мимо VPN идут программы: {string.Join(", ", directApps)}");
             }
-            string configJson = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
 
-            // Step A: Syntax validation
-            try
+            // 2. Start the core. Its local ports are picked free for every session; should another program
+            //    take one in the instant before the core binds it, the start is repeated with new ports.
+            string error = "";
+            for (int attempt = 1; attempt <= 2; attempt++)
             {
-                using var _ = JsonDocument.Parse(configJson);
-            }
-            catch (Exception ex)
-            {
-                return (false, $"Ошибка синтаксиса JSON конфигурации: {ex.Message}");
-            }
+                Local = LocalEndpoints.Create();
+                var config = GenerateSingBoxConfig(proxy, bypassTorrents, bypassDomesticRu, Local, dnsProvider, autoDnsOrder, blockQuic, blockWebRtc, blockTrackers, directApps, directSites, serverAddress);
 
-            // Step B: TOCTOU-Free Atomic Validation Gate: write staging file -> validate -> atomic replace -> execute exact same file
-            string stagingConfigPath = Path.Combine(RuntimeDir, $"staging_{_activeSessionId:N}.json");
-            try
-            {
-                byte[] configBytes = Encoding.UTF8.GetBytes(configJson);
-                using (var fs = new FileStream(stagingConfigPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                var (prepared, prepareError) = await PrepareConfigFileAsync(config, cancellationToken).ConfigureAwait(false);
+                if (!prepared)
                 {
-                    fs.Write(configBytes, 0, configBytes.Length);
-                    fs.Flush(true);
+                    Local = null;
+                    return (false, prepareError);
                 }
 
-                var (isNativeValid, nativeError) = await ValidateConfigFileWithNativeSingBoxAsync(stagingConfigPath, cancellationToken).ConfigureAwait(false);
-                if (!isNativeValid)
+                var launch = await LaunchCoreAsync(proxy, cancellationToken).ConfigureAwait(false);
+                if (launch.Success)
                 {
-                    try { if (File.Exists(stagingConfigPath)) File.Delete(stagingConfigPath); } catch { }
-                    return (false, nativeError);
+                    IsActive = true;
+                    ActiveLocal = Local;
+                    OnLog?.Invoke($"⚡ Wintun туннель активен! ({launch.DelayMs} ms) Весь трафик → {proxy.DisplayAddress}");
+                    return (true, "");
                 }
 
-                // True Windows Atomic Replacement: MoveFileEx(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
-                File.Move(stagingConfigPath, ConfigPath, overwrite: true);
+                error = launch.Error;
+                if (attempt == 1 && launch.PortConflict && !cancellationToken.IsCancellationRequested)
+                {
+                    OnLog?.Invoke("Локальный порт оказался занят другой программой. Запускаем ядро на других портах.");
+                    continue;
+                }
+                break;
             }
-            catch (Exception ex)
-            {
-                try { if (File.Exists(stagingConfigPath)) File.Delete(stagingConfigPath); } catch { }
-                return (false, $"Ошибка подготовки конфигурационного файла: {ex.Message}");
-            }
-
-            // 3. Launch sing-box.exe with Windows Job Object and non-blocking I/O
-            string lastError = "";
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = SingBoxExePath,
-                Arguments = $"run -c \"{ConfigPath}\"",
-                WorkingDirectory = CoreDir,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            _singBoxProcess = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-
-            _singBoxProcess.OutputDataReceived += (_, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(e.Data)) OnLog?.Invoke(e.Data);
-            };
-
-            _singBoxProcess.ErrorDataReceived += (_, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(e.Data))
-                {
-                    lastError = e.Data;
-                    OnLog?.Invoke(e.Data);
-                }
-            };
-
-            var thisSessionId = _activeSessionId;
-            _singBoxProcess.Exited += (_, _) =>
-            {
-                if (IsActive && _activeSessionId == thisSessionId)
-                {
-                    IsActive = false;
-                    OnUnexpectedExit?.Invoke(thisSessionId);
-                }
-            };
-
-            _singBoxProcess.Start();
-
-            // Always begin reading immediately to prevent pipe deadlock
-            _singBoxProcess.BeginOutputReadLine();
-            _singBoxProcess.BeginErrorReadLine();
-
-            // Track with Windows Job Object (Auto-kill when Zion closes)
-                        var (jobOk, jobErr) = ProcessJobTracker.TrackProcess(_singBoxProcess);
-            if (!jobOk)
-            {
-                OnLog?.Invoke($"⚠️ Process Supervisor: {jobErr}");
-            }
-
-            // 4. Multi-Level Ready-Check Pipeline with Exponential Backoff
-            using var clashClient = new ClashApiClient(9090);
-            clashClient.SetSecret(CurrentClashSecret);
-
-            bool isCoreReady = false;
-            int[] backoffDelays = { 50, 100, 150, 250, 350, 500, 500, 750, 1000 };
-
-            foreach (int delay in backoffDelays)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    StopInternal();
-                    return (false, "Запуск отменён пользователем.");
-                }
-
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-
-                if (_singBoxProcess.HasExited)
-                {
-                    string msg = !string.IsNullOrEmpty(lastError)
-                        ? $"sing-box завершил работу: {lastError}"
-                        : "Ядро sing-box неожиданно остановилось.";
-                    StopInternal();
-                    return (false, msg);
-                }
-
-                // Check 1: Clash API alive
-                bool apiAlive = await clashClient.IsAliveAsync(400);
-
-                // Check 2: Wintun interface UP in network stack
-                bool wintunUp = IsWintunInterfaceUp();
-
-                if (apiAlive && wintunUp)
-                {
-                    isCoreReady = true;
-                    break;
-                }
-            }
-
-            if (!isCoreReady)
-            {
-                string msg = !string.IsNullOrEmpty(lastError)
-                    ? $"sing-box: {lastError}"
-                    : "Таймаут инициализации сетевого адаптера Wintun. Убедитесь в наличии прав Администратора.";
-                StopInternal();
-                return (false, msg);
-            }
-
-            // 5. Authoritative Outbound Connectivity Verification via sing-box Clash API (Multi-URL Fallback)
-            string[] testEndpoints =
-            {
-                "https://www.gstatic.com/generate_204",
-                "https://cp.cloudflare.com/generate_204",
-                "https://www.google.com/generate_204"
-            };
-
-            int outboundDelay = -1;
-            ClashDelayResult? lastDelayResult = null;
-
-            foreach (var testUrl in testEndpoints)
-            {
-                if (cancellationToken.IsCancellationRequested) break;
-
-                var delayRes = await clashClient.GetDelayDetailedAsync("proxy-out", testUrl, 3000).ConfigureAwait(false);
-                lastDelayResult = delayRes;
-
-                if (delayRes.Success && delayRes.DelayMs > 0)
-                {
-                    outboundDelay = delayRes.DelayMs;
-                    break;
-                }
-
-                OnLog?.Invoke($"⚠️ Тест через {testUrl} не прошёл: {delayRes.ErrorMessage}. Пробуем альтернативный эндпоинт...");
-            }
-
-            if (outboundDelay < 0)
-            {
-                StopInternal();
-                string errorMsg = "Туннель запущен, но прокси-сервер не отвечает на контрольные сетевые запросы.";
-                if (lastDelayResult != null)
-                {
-                    if (lastDelayResult.StatusCode == 407 || lastDelayResult.ErrorMessage.Contains("407") || lastDelayResult.ErrorMessage.Contains("auth", StringComparison.OrdinalIgnoreCase))
-                    {
-                        errorMsg = "Ошибка аутентификации прокси-сервера (проверьте логин/пароль или UUID).";
-                    }
-                    else if (lastDelayResult.StatusCode == 400 || lastDelayResult.StatusCode == 404)
-                    {
-                        errorMsg = $"Сбой Clash API: {lastDelayResult.ErrorMessage} (HTTP {lastDelayResult.StatusCode})";
-                    }
-                    else if (!string.IsNullOrWhiteSpace(lastDelayResult.ErrorMessage))
-                    {
-                        errorMsg = $"Сбой проверки соединения: {lastDelayResult.ErrorMessage}";
-                    }
-                }
-                return (false, errorMsg);
-            }
-
-            IsActive = true;
-            OnLog?.Invoke($"⚡ Wintun туннель активен! ({outboundDelay} ms) Весь трафик → {proxy.DisplayAddress}");
-            return (true, "");
+            return (false, error);
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
@@ -615,6 +468,217 @@ public class TunRoutingEngine
         {
             _syncLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Serializes the config, has the core validate it and atomically moves it into place.
+    /// TOCTOU-free: the exact file that was checked is the one the core then runs.
+    /// </summary>
+    private async Task<(bool Ok, string Error)> PrepareConfigFileAsync(JsonObject config, CancellationToken cancellationToken)
+    {
+        string configJson = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+
+        // Step A: Syntax validation
+        try
+        {
+            using var _ = JsonDocument.Parse(configJson);
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Ошибка синтаксиса JSON конфигурации: {ex.Message}");
+        }
+
+        // Step B: write staging file -> validate -> atomic replace -> execute exact same file
+        string stagingConfigPath = Path.Combine(RuntimeDir, $"staging_{_activeSessionId:N}.json");
+        try
+        {
+            byte[] configBytes = Encoding.UTF8.GetBytes(configJson);
+            using (var fs = new FileStream(stagingConfigPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                fs.Write(configBytes, 0, configBytes.Length);
+                fs.Flush(true);
+            }
+
+            var (isNativeValid, nativeError) = await ValidateConfigFileWithNativeSingBoxAsync(stagingConfigPath, cancellationToken).ConfigureAwait(false);
+            if (!isNativeValid)
+            {
+                try { if (File.Exists(stagingConfigPath)) File.Delete(stagingConfigPath); } catch { }
+                return (false, nativeError);
+            }
+
+            // True Windows Atomic Replacement: MoveFileEx(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+            File.Move(stagingConfigPath, ConfigPath, overwrite: true);
+            return (true, "");
+        }
+        catch (Exception ex)
+        {
+            try { if (File.Exists(stagingConfigPath)) File.Delete(stagingConfigPath); } catch { }
+            return (false, $"Ошибка подготовки конфигурационного файла: {ex.Message}");
+        }
+    }
+
+    private sealed record LaunchResult(bool Success, string Error, bool PortConflict, int DelayMs);
+
+    /// <summary>
+    /// Runs the prepared config, waits until the control API and the Wintun adapter are up, then proves
+    /// that real traffic passes through the server. Any failure stops the core again.
+    /// </summary>
+    private async Task<LaunchResult> LaunchCoreAsync(ProxyItem proxy, CancellationToken cancellationToken)
+    {
+        var local = Local!;
+        string lastError = "";
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = SingBoxExePath,
+            Arguments = $"run -c \"{ConfigPath}\"",
+            WorkingDirectory = CoreDir,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        _singBoxProcess = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+
+        _singBoxProcess.OutputDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrWhiteSpace(e.Data)) OnLog?.Invoke(e.Data);
+        };
+
+        _singBoxProcess.ErrorDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrWhiteSpace(e.Data))
+            {
+                lastError = e.Data;
+                OnLog?.Invoke(e.Data);
+            }
+        };
+
+        var thisSessionId = _activeSessionId;
+        _singBoxProcess.Exited += (_, _) =>
+        {
+            if (IsActive && _activeSessionId == thisSessionId)
+            {
+                IsActive = false;
+                ActiveLocal = null;
+                OnUnexpectedExit?.Invoke(thisSessionId);
+            }
+        };
+
+        _singBoxProcess.Start();
+
+        // Always begin reading immediately to prevent pipe deadlock
+        _singBoxProcess.BeginOutputReadLine();
+        _singBoxProcess.BeginErrorReadLine();
+
+        // Track with Windows Job Object (Auto-kill when Zion closes)
+        var (jobOk, jobErr) = ProcessJobTracker.TrackProcess(_singBoxProcess);
+        if (!jobOk)
+        {
+            OnLog?.Invoke($"⚠️ Process Supervisor: {jobErr}");
+        }
+
+        // Ready-check with backoff: control API answers and the Wintun adapter is up
+        using var clashClient = new ClashApiClient(local.ControlPort, local.ControlSecret);
+
+        bool isCoreReady = false;
+        int[] backoffDelays = { 50, 100, 150, 250, 350, 500, 500, 750, 1000 };
+
+        foreach (int delay in backoffDelays)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                StopInternal();
+                return new LaunchResult(false, "Запуск отменён пользователем.", false, -1);
+            }
+
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+
+            if (_singBoxProcess.HasExited)
+            {
+                string msg = !string.IsNullOrEmpty(lastError)
+                    ? $"sing-box завершил работу: {lastError}"
+                    : "Ядро sing-box неожиданно остановилось.";
+                bool portConflict = LocalEndpoints.IsPortConflict(lastError);
+                StopInternal();
+                return new LaunchResult(false, msg, portConflict, -1);
+            }
+
+            bool apiAlive = await clashClient.IsAliveAsync(400);
+            bool wintunUp = IsWintunInterfaceUp();
+
+            if (apiAlive && wintunUp)
+            {
+                isCoreReady = true;
+                break;
+            }
+        }
+
+        if (!isCoreReady)
+        {
+            string msg = !string.IsNullOrEmpty(lastError)
+                ? $"sing-box: {lastError}"
+                : "Таймаут инициализации сетевого адаптера Wintun. Убедитесь в наличии прав Администратора.";
+            bool portConflict = LocalEndpoints.IsPortConflict(lastError);
+            StopInternal();
+            return new LaunchResult(false, msg, portConflict, -1);
+        }
+
+        // Authoritative outbound check through the control API (several test pages)
+        string[] testEndpoints =
+        {
+            "https://www.gstatic.com/generate_204",
+            "https://cp.cloudflare.com/generate_204",
+            "https://www.google.com/generate_204"
+        };
+
+        int outboundDelay = -1;
+        ClashDelayResult? lastDelayResult = null;
+
+        foreach (var testUrl in testEndpoints)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+
+            var delayRes = await clashClient.GetDelayDetailedAsync("proxy-out", testUrl, 3000).ConfigureAwait(false);
+            lastDelayResult = delayRes;
+
+            if (delayRes.Success && delayRes.DelayMs > 0)
+            {
+                outboundDelay = delayRes.DelayMs;
+                break;
+            }
+
+            OnLog?.Invoke($"⚠️ Тест через {testUrl} не прошёл: {delayRes.ErrorMessage}. Пробуем альтернативный эндпоинт...");
+        }
+
+        if (outboundDelay < 0)
+        {
+            StopInternal();
+            LastStartServerUnreachable = !cancellationToken.IsCancellationRequested;
+            string errorMsg = "Туннель запущен, но прокси-сервер не отвечает на контрольные сетевые запросы.";
+            if (lastDelayResult != null)
+            {
+                if (lastDelayResult.StatusCode == 407 || lastDelayResult.ErrorMessage.Contains("407") || lastDelayResult.ErrorMessage.Contains("auth", StringComparison.OrdinalIgnoreCase))
+                {
+                    errorMsg = "Ошибка аутентификации прокси-сервера (проверьте логин/пароль или UUID).";
+                }
+                else if (lastDelayResult.StatusCode == 400 || lastDelayResult.StatusCode == 404)
+                {
+                    errorMsg = $"Сбой Clash API: {lastDelayResult.ErrorMessage} (HTTP {lastDelayResult.StatusCode})";
+                }
+                else if (!string.IsNullOrWhiteSpace(lastDelayResult.ErrorMessage))
+                {
+                    errorMsg = $"Сбой проверки соединения: {lastDelayResult.ErrorMessage}";
+                }
+            }
+            return new LaunchResult(false, errorMsg, false, -1);
+        }
+
+        // The server just proved it works: that is the freshest check there is
+        proxy.Status = ProxyStatus.Online;
+        proxy.PingMs = outboundDelay;
+        return new LaunchResult(true, "", false, outboundDelay);
     }
 
     private static bool IsWintunInterfaceUp()
@@ -649,6 +713,8 @@ public class TunRoutingEngine
     {
         if (!IsActive && _singBoxProcess == null) return;
         IsActive = false;
+        Local = null;
+        ActiveLocal = null;
 
         try
         {
@@ -693,10 +759,10 @@ public class TunRoutingEngine
         return results.OrderBy(r => r.LatencyMs).ToList();
     }
 
-    public static JsonObject GenerateSingBoxConfig(ProxyItem proxy, bool bypassTorrents = false, bool bypassDomesticRu = false, string clashSecret = "", DnsProvider dnsProvider = DnsProvider.Auto, List<DnsBenchmarkResult>? autoDnsOrder = null, bool blockQuic = false, bool blockWebRtc = false, bool blockTrackers = false, IReadOnlyCollection<string>? directApps = null, IReadOnlyCollection<string>? directSites = null)
+    public static JsonObject GenerateSingBoxConfig(ProxyItem proxy, bool bypassTorrents = false, bool bypassDomesticRu = false, LocalEndpoints? local = null, DnsProvider dnsProvider = DnsProvider.Auto, List<DnsBenchmarkResult>? autoDnsOrder = null, bool blockQuic = false, bool blockWebRtc = false, bool blockTrackers = false, IReadOnlyCollection<string>? directApps = null, IReadOnlyCollection<string>? directSites = null, string? serverAddress = null)
     {
         string host = proxy.CleanHost;
-        int port = proxy.Port;
+        local ??= LocalEndpoints.Create();
 
         var routeRules = new JsonArray
         {
@@ -856,6 +922,14 @@ public class TunRoutingEngine
         }
 
         // 4. Direct Outbound for Proxy Endpoints (Zero DNS deadlocks & Real Direct Physical Latency)
+        if (!string.IsNullOrWhiteSpace(serverAddress) && IPAddress.TryParse(serverAddress, out _))
+        {
+            routeRules.Add(new JsonObject
+            {
+                ["ip_cidr"] = new JsonArray { $"{serverAddress}/32" },
+                ["outbound"] = "direct-out"
+            });
+        }
         if (!string.IsNullOrEmpty(host))
         {
             if (IPAddress.TryParse(host, out _))
@@ -984,8 +1058,8 @@ public class TunRoutingEngine
             {
                 ["clash_api"] = new JsonObject
                 {
-                    ["external_controller"] = "127.0.0.1:9090",
-                    ["secret"] = clashSecret
+                    ["external_controller"] = $"127.0.0.1:{local.ControlPort}",
+                    ["secret"] = local.ControlSecret
                 }
             },
             ["dns"] = new JsonObject
@@ -1018,12 +1092,18 @@ public class TunRoutingEngine
                     ["stack"] = "mixed",
                     ["endpoint_independent_nat"] = true
                 },
+                // Zion's own entry into the VPN (DNS checks, subscription downloads): loopback only,
+                // a free port per session, and a login no other program knows
                 new JsonObject
                 {
-                    ["type"] = "mixed",
-                    ["tag"] = "mixed-in",
+                    ["type"] = "socks",
+                    ["tag"] = "socks-in",
                     ["listen"] = "127.0.0.1",
-                    ["listen_port"] = 9050
+                    ["listen_port"] = local.SocksPort,
+                    ["users"] = new JsonArray
+                    {
+                        new JsonObject { ["username"] = local.SocksUser, ["password"] = local.SocksPassword }
+                    }
                 }
             },
             ["route"] = new JsonObject
@@ -1035,6 +1115,29 @@ public class TunRoutingEngine
             }
         };
 
+        var proxyOutbound = BuildProxyOutbound(proxy, "proxy-out", serverAddress);
+
+        config["outbounds"] = new JsonArray
+        {
+            proxyOutbound,
+            new JsonObject { ["type"] = "direct", ["tag"] = "direct-out" }
+        };
+
+        return config;
+    }
+
+    /// <summary>
+    /// The outbound for one server: protocol, TLS/Reality, transport. Shared by the tunnel ("proxy-out")
+    /// and the server check, which puts every server into one config under its own tag.
+    /// <paramref name="address"/> connects to that exact IP instead of resolving the server's name;
+    /// the name is still what the TLS handshake and headers carry.
+    /// </summary>
+    public static JsonObject BuildProxyOutbound(ProxyItem proxy, string tag = "proxy-out", string? address = null)
+    {
+        string host = proxy.CleanHost;
+        string server = string.IsNullOrWhiteSpace(address) ? host : address;
+        int port = proxy.Port;
+
         JsonObject proxyOutbound;
 
         if (proxy.Protocol == ProxyProtocol.Vless)
@@ -1042,8 +1145,8 @@ public class TunRoutingEngine
             proxyOutbound = new JsonObject
             {
                 ["type"] = "vless",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port,
                 ["uuid"] = proxy.Uuid
             };
@@ -1173,8 +1276,8 @@ public class TunRoutingEngine
             proxyOutbound = new JsonObject
             {
                 ["type"] = "trojan",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port,
                 ["password"] = !string.IsNullOrEmpty(proxy.Password) ? proxy.Password : proxy.Uuid
             };
@@ -1233,8 +1336,8 @@ public class TunRoutingEngine
             proxyOutbound = new JsonObject
             {
                 ["type"] = "shadowsocks",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port,
                 ["method"] = method,
                 ["password"] = pass
@@ -1246,8 +1349,8 @@ public class TunRoutingEngine
             proxyOutbound = new JsonObject
             {
                 ["type"] = "vmess",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port,
                 ["uuid"] = proxy.Uuid,
                 ["alter_id"] = 0,
@@ -1300,15 +1403,15 @@ public class TunRoutingEngine
         }
         else if (proxy.Protocol is ProxyProtocol.Hysteria2 or ProxyProtocol.Tuic)
         {
-            proxyOutbound = BuildQuicOutbound(proxy, host, port);
+            proxyOutbound = BuildQuicOutbound(proxy, host, server, port, tag);
         }
         else if (proxy.Protocol == ProxyProtocol.Socks5)
         {
             proxyOutbound = new JsonObject
             {
                 ["type"] = "socks",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port
             };
             if (proxy.HasAuth)
@@ -1322,8 +1425,8 @@ public class TunRoutingEngine
             proxyOutbound = new JsonObject
             {
                 ["type"] = "http",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port
             };
             if (proxy.HasAuth)
@@ -1339,20 +1442,14 @@ public class TunRoutingEngine
             proxyOutbound["tcp_keep_alive_interval"] = "15s";
         }
 
-        config["outbounds"] = new JsonArray
-        {
-            proxyOutbound,
-            new JsonObject { ["type"] = "direct", ["tag"] = "direct-out" }
-        };
-
-        return config;
+        return proxyOutbound;
     }
 
     /// <summary>
     /// Hysteria2 / TUIC outbound. Both run over QUIC: TLS is always on, ALPN is h3 unless the link says
     /// otherwise, and there is no uTLS (it exists only for TCP handshakes).
     /// </summary>
-    private static JsonObject BuildQuicOutbound(ProxyItem proxy, string host, int port)
+    private static JsonObject BuildQuicOutbound(ProxyItem proxy, string host, string server, int port, string tag)
     {
         var alpn = new JsonArray();
         string alpnText = !string.IsNullOrWhiteSpace(proxy.Alpn) ? proxy.Alpn : "h3";
@@ -1372,8 +1469,8 @@ public class TunRoutingEngine
             var outbound = new JsonObject
             {
                 ["type"] = "hysteria2",
-                ["tag"] = "proxy-out",
-                ["server"] = host,
+                ["tag"] = tag,
+                ["server"] = server,
                 ["server_port"] = port,
                 ["password"] = proxy.Password ?? ""
             };
@@ -1400,8 +1497,8 @@ public class TunRoutingEngine
         var tuic = new JsonObject
         {
             ["type"] = "tuic",
-            ["tag"] = "proxy-out",
-            ["server"] = host,
+            ["tag"] = tag,
+            ["server"] = server,
             ["server_port"] = port,
             ["uuid"] = proxy.Uuid ?? "",
             ["password"] = proxy.Password ?? ""

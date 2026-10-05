@@ -1,0 +1,316 @@
+﻿<!-- Main screen: session timer, power button, server and DNS cards, quick switches -->
+<UserControl x:Class="Zion.Views.Screens.DashboardView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:Zion.Views"
+             xmlns:controls="clr-namespace:Zion.Views.Controls"
+             Style="{StaticResource ScreenHost}">
+    <UserControl.RenderTransform>
+        <TranslateTransform/>
+    </UserControl.RenderTransform>
+
+    <Grid Margin="20,16,20,18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Notification (server switched, Kill Switch problems). Takes the place of the session
+             timer while it is shown; click to dismiss. -->
+        <Button Grid.Row="0" Grid.RowSpan="3" VerticalAlignment="Top" Margin="0,50,0,0" MinHeight="58"
+                Panel.ZIndex="10" Cursor="Hand" Focusable="False"
+                Command="{Binding DismissToastCommand}"
+                Visibility="{Binding IsToastVisible, Converter={StaticResource BoolToVis}}">
+            <Button.Template>
+                <ControlTemplate TargetType="Button">
+                    <Border Background="{StaticResource Surface}" BorderBrush="{StaticResource AccentStroke}" BorderThickness="1"
+                            CornerRadius="16" Padding="14,11">
+                        <DockPanel>
+                            <Path DockPanel.Dock="Right" Data="M 0 0 L 8 8 M 8 0 L 0 8" Stroke="{StaticResource TextMuted}" StrokeThickness="1.6"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" VerticalAlignment="Center" Margin="10,0,2,0"/>
+                            <Ellipse Width="7" Height="7" Fill="{StaticResource AccentHi}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <TextBlock Text="{Binding ToastText}" FontSize="12" Foreground="{StaticResource TextPrimary}"
+                                       TextWrapping="Wrap" VerticalAlignment="Center"/>
+                        </DockPanel>
+                    </Border>
+                </ControlTemplate>
+            </Button.Template>
+        </Button>
+
+        <!-- Top bar: wordmark + window controls -->
+        <DockPanel Grid.Row="0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- Wordmark glows in the same colour as the power button: a blurred copy sits under the crisp text -->
+                <Grid VerticalAlignment="Center" Margin="2,0,0,0">
+                    <TextBlock Text="Zion" FontSize="19" FontWeight="Bold" Foreground="{Binding StatusDotColor}"
+                               FontFamily="Segoe UI Variable Display, Segoe UI" Opacity="0.9" IsHitTestVisible="False">
+                        <TextBlock.Effect>
+                            <BlurEffect Radius="14"/>
+                        </TextBlock.Effect>
+                    </TextBlock>
+                    <TextBlock Text="Zion" FontSize="19" FontWeight="Bold" Foreground="{Binding PowerBtnRingStroke}"
+                               FontFamily="Segoe UI Variable Display, Segoe UI"/>
+                </Grid>
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <Button Style="{StaticResource WinBtn}" Command="{Binding NavigateToSettingsCommand}" Margin="0,0,2,0" ToolTip="Настройки">
+                    <Path Width="15" Height="15" Stretch="Uniform"
+                          Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                          Data="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+                </Button>
+                <controls:WindowButtons/>
+            </StackPanel>
+        </DockPanel>
+
+        <!-- Hero: session timer, traffic, power button, prompt -->
+        <StackPanel Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,2,0,6">
+            <!-- Steps aside while a notification is shown in its place (keeps its space, so nothing jumps) -->
+            <StackPanel>
+                <StackPanel.Style>
+                    <Style TargetType="StackPanel">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsToastVisible}" Value="True">
+                                <Setter Property="Opacity" Value="0"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </StackPanel.Style>
+                <TextBlock Text="{Binding SessionTimerText}" FontSize="44" FontWeight="Light"
+                           FontFamily="Segoe UI Variable Display, Segoe UI" Typography.NumeralAlignment="Tabular"
+                           Foreground="{StaticResource TextPrimary}" HorizontalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,8">
+                    <TextBlock Text="Трафик за сессию  ·  " FontSize="11" Foreground="{StaticResource TextMuted}"/>
+                    <TextBlock Text="{Binding TotalTrafficText}" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
+                </StackPanel>
+            </StackPanel>
+
+            <Grid Width="172" Height="172" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  SnapsToDevicePixels="False" UseLayoutRounding="False">
+                <!-- Breathing outer ring -->
+                <Grid x:Name="HaloContainer" Width="160" Height="160"
+                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                      RenderTransformOrigin="0.5,0.5"
+                      SnapsToDevicePixels="False" UseLayoutRounding="False">
+                    <Grid.RenderTransform>
+                        <ScaleTransform x:Name="HaloScale" ScaleX="1.0" ScaleY="1.0"/>
+                    </Grid.RenderTransform>
+                    <Border Width="160" Height="160" CornerRadius="80" Opacity="0.55"
+                            Background="{Binding OuterHaloBg}"
+                            SnapsToDevicePixels="False" UseLayoutRounding="False"/>
+                    <Border x:Name="OuterHaloGlowBorder" Width="160" Height="160" CornerRadius="80"
+                            BorderBrush="{Binding OuterHaloBorder}"
+                            BorderThickness="1.5" Opacity="0.35"
+                            SnapsToDevicePixels="False" UseLayoutRounding="False"/>
+                </Grid>
+                <Border Width="142" Height="142" CornerRadius="71" BorderBrush="#1FFFFFFF" BorderThickness="1"
+                        IsHitTestVisible="False" SnapsToDevicePixels="False" UseLayoutRounding="False"/>
+
+                <!-- Power button -->
+                <Button Width="124" Height="124" Cursor="Hand" Focusable="False"
+                        Command="{Binding ToggleConnectionCommand}"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        Background="Transparent" BorderThickness="0"
+                        SnapsToDevicePixels="False" UseLayoutRounding="False"
+                        RenderTransformOrigin="0.5,0.5">
+                    <Button.RenderTransform>
+                        <ScaleTransform x:Name="BtnBreathingScale" ScaleX="1.0" ScaleY="1.0"/>
+                    </Button.RenderTransform>
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Grid x:Name="btnGrid" RenderTransformOrigin="0.5,0.5"
+                                  SnapsToDevicePixels="False" UseLayoutRounding="False">
+                                <Grid.RenderTransform>
+                                    <ScaleTransform ScaleX="1.0" ScaleY="1.0"/>
+                                </Grid.RenderTransform>
+                                <Border CornerRadius="62"
+                                        BorderBrush="{Binding PowerBtnRingStroke}"
+                                        BorderThickness="1.5"
+                                        Background="{Binding PowerBtnBrush}"
+                                        SnapsToDevicePixels="False" UseLayoutRounding="False"/>
+                                <Grid Width="42" Height="42" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <Path Data="M 13.5 8 A 15 15 0 1 0 28.5 8"
+                                          Stroke="#FFFFFF" StrokeThickness="3.4"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" Fill="Transparent"/>
+                                    <Line X1="21" Y1="2" X2="21" Y2="15"
+                                          Stroke="#FFFFFF" StrokeThickness="3.4"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                </Grid>
+                            </Grid>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="btnGrid" Property="RenderTransform">
+                                        <Setter.Value>
+                                            <ScaleTransform ScaleX="1.035" ScaleY="1.035"/>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Trigger>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="btnGrid" Property="RenderTransform">
+                                        <Setter.Value>
+                                            <ScaleTransform ScaleX="0.955" ScaleY="0.955"/>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+
+                <Grid.Triggers>
+                    <EventTrigger RoutedEvent="Grid.Loaded">
+                        <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever" AutoReverse="True" Timeline.DesiredFrameRate="60">
+                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HaloScale"
+                                                               Storyboard.TargetProperty="ScaleX" Duration="0:0:1.6">
+                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.07" KeySpline="0.4,0.0 0.2,1.0"/>
+                                </DoubleAnimationUsingKeyFrames>
+                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HaloScale"
+                                                               Storyboard.TargetProperty="ScaleY" Duration="0:0:1.6">
+                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.07" KeySpline="0.4,0.0 0.2,1.0"/>
+                                </DoubleAnimationUsingKeyFrames>
+                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="OuterHaloGlowBorder"
+                                                               Storyboard.TargetProperty="Opacity" Duration="0:0:1.6">
+                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="0.9" KeySpline="0.4,0.0 0.2,1.0"/>
+                                </DoubleAnimationUsingKeyFrames>
+                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="BtnBreathingScale"
+                                                               Storyboard.TargetProperty="ScaleX" Duration="0:0:1.6">
+                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.02" KeySpline="0.4,0.0 0.2,1.0"/>
+                                </DoubleAnimationUsingKeyFrames>
+                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="BtnBreathingScale"
+                                                               Storyboard.TargetProperty="ScaleY" Duration="0:0:1.6">
+                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.02" KeySpline="0.4,0.0 0.2,1.0"/>
+                                </DoubleAnimationUsingKeyFrames>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Grid.Triggers>
+            </Grid>
+
+            <TextBlock Text="{Binding PowerPromptText}" FontSize="12" FontWeight="SemiBold"
+                       Foreground="{Binding PowerStatusTextColor}" HorizontalAlignment="Center" Margin="0,6,0,0"/>
+        </StackPanel>
+
+        <!-- Bottom cards -->
+        <StackPanel Grid.Row="2" VerticalAlignment="Bottom">
+            <!-- Server -->
+            <Button Style="{StaticResource CardButton}" Margin="0,0,0,8"
+                    Command="{Binding OpenServerListCommand}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Width="38" Height="38" CornerRadius="12" Background="{StaticResource GlassHover}" Margin="0,0,12,0">
+                        <views:FlagBadge Country="{Binding ServerCardCountry}" Width="24" Height="16"
+                                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
+                        <TextBlock Text="СЕРВЕР" Style="{StaticResource Overline}"/>
+                        <TextBlock Text="{Binding ServerCardSubtitle}" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextPrimary}" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Style="{StaticResource Pill}">
+                            <TextBlock Text="{Binding ServerCardBadge}" FontSize="9.5" FontWeight="Bold" Foreground="{StaticResource AccentHi}"/>
+                        </Border>
+                        <Path Data="M 0 0 L 4.5 4.5 L 0 9" Stroke="{StaticResource TextMuted}" StrokeThickness="1.6"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                              VerticalAlignment="Center" Margin="10,0,2,0"/>
+                    </StackPanel>
+                </Grid>
+            </Button>
+
+            <!-- DNS -->
+            <Button Style="{StaticResource CardButton}" Margin="0,0,0,8"
+                    Command="{Binding OpenDnsModalCommand}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Width="38" Height="38" CornerRadius="12" Background="{StaticResource GlassHover}" Margin="0,0,12,0">
+                        <Path Width="18" Height="18" Stretch="Uniform" Stroke="{StaticResource AccentHi}" StrokeThickness="1.5"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              Data="M 12 2 A 10 10 0 1 0 12 22 A 10 10 0 1 0 12 2 M 2 12 H 22 M 12 2 C 8 6 8 18 12 22 M 12 2 C 16 6 16 18 12 22"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
+                        <TextBlock Text="DNS" Style="{StaticResource Overline}"/>
+                        <TextBlock Text="{Binding DnsSubtitleText}" FontSize="12.5" FontWeight="SemiBold"
+                                   Foreground="{Binding DnsSubtitleColor}" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Style="{StaticResource Pill}">
+                            <TextBlock Text="{Binding DnsBadgeText}" FontSize="9.5" FontWeight="Bold" Foreground="{StaticResource AccentHi}"/>
+                        </Border>
+                        <Path Data="M 0 0 L 4.5 4.5 L 0 9" Stroke="{StaticResource TextMuted}" StrokeThickness="1.6"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                              VerticalAlignment="Center" Margin="10,0,2,0"/>
+                    </StackPanel>
+                </Grid>
+            </Button>
+
+            <!-- Live speed -->
+            <Border CornerRadius="16" Background="{StaticResource Glass}" BorderBrush="{StaticResource Stroke}" BorderThickness="1"
+                    Padding="14,9" Margin="0,0,0,8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Width="26" Height="26" CornerRadius="9" Background="#1F34E0A1" Margin="0,0,10,0">
+                            <Path Data="M 5 0 V 10 M 0.5 5.5 L 5 10 L 9.5 5.5" Stroke="{StaticResource Success}" StrokeThickness="1.7"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="ЗАГРУЗКА" Style="{StaticResource Overline}" FontSize="9"/>
+                            <TextBlock Text="{Binding DownSpeedText}" FontSize="12.5" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}"/>
+                        </StackPanel>
+                    </StackPanel>
+                    <Border Grid.Column="1" Width="1" Background="{StaticResource Stroke}" Margin="10,2"/>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="4,0,0,0">
+                        <Border Width="26" Height="26" CornerRadius="9" Background="{StaticResource AccentSoft}" Margin="0,0,10,0">
+                            <Path Data="M 5 10 V 0 M 0.5 4.5 L 5 0 L 9.5 4.5" Stroke="{StaticResource AccentHi}" StrokeThickness="1.7"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="ОТДАЧА" Style="{StaticResource Overline}" FontSize="9"/>
+                            <TextBlock Text="{Binding UpSpeedText}" FontSize="12.5" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Quick settings -->
+            <UniformGrid Columns="2">
+                <CheckBox Style="{StaticResource QuickToggle}"
+                          Content="Автоподключение"
+                          IsChecked="{Binding AutoConnectOnStartup}"
+                          Margin="0,0,4,8"
+                          ToolTip="Автоматически поднимать туннель при запуске приложения"/>
+                <CheckBox Style="{StaticResource QuickToggle}"
+                          Content="Обход РФ"
+                          IsChecked="{Binding BypassDomesticRu}"
+                          Margin="4,0,0,8"
+                          ToolTip="Прямое подключение к РУ сайтам"/>
+                <CheckBox Style="{StaticResource QuickToggle}"
+                          Content="Обход торрентов"
+                          IsChecked="{Binding BypassTorrents}"
+                          Margin="0,0,4,0"
+                          ToolTip="Скачивание торрентов напрямую без VPN"/>
+                <CheckBox Style="{StaticResource QuickToggle}"
+                          Content="Kill Switch"
+                          IsChecked="{Binding KillSwitch}"
+                          Margin="4,0,0,0"
+                          ToolTip="Блокировка трафика при аварийном разрыве VPN"/>
+            </UniformGrid>
+        </StackPanel>
+    </Grid>
+</UserControl>

@@ -1,4 +1,5 @@
-﻿using Zion.Models;
+﻿using System.Net;
+using Zion.Models;
 
 namespace Zion.Services;
 
@@ -217,11 +218,12 @@ public class ConnectionController : IDisposable
     private async Task<bool> IsDnsWorkingAsync(CancellationToken ct)
     {
         var target = _tun.ActiveDnsTarget;
-        if (target == null || string.IsNullOrEmpty(target.Host)) return true; // nothing we know how to check
+        var tunnel = _tun.Local;
+        if (target == null || string.IsNullOrEmpty(target.Host) || tunnel == null) return true; // nothing we know how to check
 
-        if (await DohProbe.ProbeAsync(target, ct: ct).ConfigureAwait(false) != null) return true;
+        if (await DohProbe.ProbeAsync(target, tunnel, ct: ct).ConfigureAwait(false) != null) return true;
         await Task.Delay(DnsRecheckDelay, ct).ConfigureAwait(false);
-        return await DohProbe.ProbeAsync(target, ct: ct).ConfigureAwait(false) != null;
+        return await DohProbe.ProbeAsync(target, tunnel, ct: ct).ConfigureAwait(false) != null;
     }
 
     /// <summary>
@@ -232,13 +234,14 @@ public class ConnectionController : IDisposable
     private async Task<bool> TryDnsFailoverAsync(Guid sessionId, CancellationToken ct)
     {
         var current = _tun.ActiveDnsTarget;
+        var tunnel = _tun.Local;
         var args = _lastArgs;
-        if (current == null || args == null) return false;
+        if (current == null || args == null || tunnel == null) return false;
 
         var candidates = DohProbe.FailoverCandidates(args.Dns, current);
 
         LogReceived?.Invoke($"DNS {current.Name} ({current.Ip}) не отвечает через VPN. Ищем замену…");
-        var ranked = await DohProbe.RankAsync(candidates, ct: ct).ConfigureAwait(false);
+        var ranked = await DohProbe.RankAsync(candidates, tunnel, ct).ConfigureAwait(false);
         if (ct.IsCancellationRequested || sessionId != _currentSessionId) return false;
 
         if (ranked.Count == 0)
@@ -346,26 +349,9 @@ public class ConnectionController : IDisposable
                     return false;
                 }
 
-                // Step 1: Pre-validation of Proxy Reachability & Protocol Handshake
+                // Config validation, start and a real request through the server all happen in StartAsync
                 SetSessionState(ConnectionState.Validating, sessionId);
-                bool isProxyReachable = await ProxyCheckerService.CheckProxyAsync(proxy, ct).ConfigureAwait(false);
-
-                if (sessionId != _currentSessionId || ct.IsCancellationRequested)
-                {
-                    return false;
-                }
-
-                if (!isProxyReachable && proxy.Status == ProxyStatus.AuthError)
-                {
-                    _tun.Stop();
-                    ActiveProxy = null;
-                    ConnectedStartTime = null;
-                    SetSessionState(ConnectionState.Failed, sessionId, "Ошибка аутентификации прокси (неверный логин/пароль или UUID).");
-                    return false;
-                }
-
-                // Step 2: Start TUN Core with Native Validation & Clash Delay Ready-Check
-                var (success, error) = await _tun.StartAsync(proxy, bypassTorrents, bypassDomesticRu, dns, blockQuic, blockWebRtc, blockTrackers, sessionId, ct, DirectApps, _preferredDns, DirectSites).ConfigureAwait(false);
+                var (success, error) = await StartTunnelAsync(proxy, sessionId, ct).ConfigureAwait(false);
 
                 if (sessionId != _currentSessionId || ct.IsCancellationRequested)
                 {
@@ -377,7 +363,7 @@ public class ConnectionController : IDisposable
                 {
                     ActiveProxy = proxy;
                     ConnectedStartTime = DateTime.Now;
-                    _clashApi.SetSecret(_tun.CurrentClashSecret);
+                    _clashApi.Configure(_tun.Local!.ControlPort, _tun.Local.ControlSecret);
                     _clashApi.StartTrafficStream();
 
                     SetSessionState(ConnectionState.Connected, sessionId);
@@ -451,26 +437,8 @@ public class ConnectionController : IDisposable
                 _clashApi.StopTrafficStream();
                 _tun.Stop();
 
-                // Step 1: Pre-validate new proxy
                 SetSessionState(ConnectionState.Validating, sessionId);
-                bool isProxyReachable = await ProxyCheckerService.CheckProxyAsync(newProxy, ct).ConfigureAwait(false);
-
-                if (sessionId != _currentSessionId || ct.IsCancellationRequested)
-                {
-                    return false;
-                }
-
-                if (!isProxyReachable && newProxy.Status == ProxyStatus.AuthError)
-                {
-                    _tun.Stop();
-                    ActiveProxy = null;
-                    ConnectedStartTime = null;
-                    SetSessionState(ConnectionState.Failed, sessionId, "Ошибка аутентификации прокси.");
-                    return false;
-                }
-
-                // Step 2: Start new session tunnel
-                var (success, error) = await _tun.StartAsync(newProxy, bypassTorrents, bypassDomesticRu, dns, blockQuic, blockWebRtc, blockTrackers, sessionId, ct, DirectApps, _preferredDns, DirectSites).ConfigureAwait(false);
+                var (success, error) = await StartTunnelAsync(newProxy, sessionId, ct).ConfigureAwait(false);
 
                 if (sessionId != _currentSessionId || ct.IsCancellationRequested)
                 {
@@ -482,7 +450,7 @@ public class ConnectionController : IDisposable
                 {
                     ActiveProxy = newProxy;
                     ConnectedStartTime = DateTime.Now;
-                    _clashApi.SetSecret(_tun.CurrentClashSecret);
+                    _clashApi.Configure(_tun.Local!.ControlPort, _tun.Local.ControlSecret);
                     _clashApi.StartTrafficStream();
 
                     SetSessionState(ConnectionState.Connected, sessionId);
@@ -515,6 +483,47 @@ public class ConnectionController : IDisposable
             SetSessionState(ConnectionState.Failed, sessionId, ex.Message);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Starts the tunnel to a server with the current settings (<see cref="_lastArgs"/>). A server name
+    /// often stands for several addresses, some of which may be dead or blocked, and the core would pick
+    /// one at random. So the address the last check found working goes first; if the server still
+    /// passes no traffic, all of its addresses are checked right away and the start is repeated on one
+    /// that works.
+    /// </summary>
+    private async Task<(bool Success, string Error)> StartTunnelAsync(ProxyItem proxy, Guid sessionId, CancellationToken ct)
+    {
+        var a = _lastArgs!;
+        Task<(bool, string)> Start(string? address) => _tun.StartAsync(proxy, a.BypassTorrents, a.BypassDomesticRu, a.Dns, a.BlockQuic, a.BlockWebRtc, a.BlockTrackers,
+                                                                        sessionId, ct, DirectApps, _preferredDns, DirectSites, address);
+
+        var (ok, error) = await Start(proxy.WorkingAddress).ConfigureAwait(false);
+        if (ok || !_tun.LastStartServerUnreachable || ct.IsCancellationRequested || sessionId != _currentSessionId ||
+            IPAddress.TryParse(proxy.CleanHost, out _))
+        {
+            return (ok, error);
+        }
+
+        LogReceived?.Invoke($"«{proxy.CleanName}» не ответил. Проверяем все его адреса…");
+        var check = (await ServerChecker.CheckAsync(new[] { proxy }, ct: ct).ConfigureAwait(false)).FirstOrDefault();
+        if (check == null || ct.IsCancellationRequested || sessionId != _currentSessionId) return (ok, error);
+
+        if (check.Outcome == ServerCheckOutcome.Working && check.Address != null)
+        {
+            proxy.WorkingAddress = check.Address;
+            LogReceived?.Invoke($"Рабочий адрес нашёлся ({check.DelayMs} ms), подключаемся через него.");
+            return await Start(check.Address).ConfigureAwait(false);
+        }
+
+        if (check.Outcome == ServerCheckOutcome.NotWorking)
+        {
+            proxy.WorkingAddress = null;
+            proxy.Status = ProxyStatus.Offline;
+            proxy.PingMs = -1;
+            LogReceived?.Invoke($"«{proxy.CleanName}» не отвечает ни по одному адресу.");
+        }
+        return (ok, error);
     }
 
     public async Task DisconnectAsync()

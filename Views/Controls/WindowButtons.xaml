@@ -1,0 +1,15 @@
+<!-- Minimize and hide-to-tray, at the right end of every screen's header -->
+<UserControl x:Class="Zion.Views.Controls.WindowButtons"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <Button Style="{StaticResource WinBtn}" Click="Minimize_Click" Margin="0,0,2,0" ToolTip="Свернуть">
+            <Path Data="M 0 0 H 10" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+        </Button>
+        <Button Style="{StaticResource WinBtnClose}" Click="Hide_Click" ToolTip="Скрыть в трей">
+            <Path Data="M 0 0 L 9 9 M 9 0 L 0 9" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+        </Button>
+    </StackPanel>
+</UserControl>

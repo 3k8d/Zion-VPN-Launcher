@@ -206,6 +206,14 @@ public static class SubscriptionService
         // 2. Update matched servers in place (keeps favourites, ping, selection)
         foreach (var (existing, fresh) in updates)
         {
+            // A server that moved: what the last check found (and the address it pinned) no longer applies
+            if (!string.Equals(existing.CleanHost, fresh.CleanHost, StringComparison.OrdinalIgnoreCase) || existing.Port != fresh.Port)
+            {
+                existing.Status = ProxyStatus.Unknown;
+                existing.PingMs = -1;
+                existing.WorkingAddress = null;
+            }
+
             existing.Name = fresh.Name;
             existing.Host = fresh.Host;
             existing.Port = fresh.Port;

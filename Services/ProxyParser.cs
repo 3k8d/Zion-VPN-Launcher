@@ -1115,11 +1115,11 @@ public static class ProxyParser
 
         string deviceHwid = GetOrGenerateDeviceHwid();
 
-        // 1. Check if Zion VPN tunnel is currently active (local SOCKS5 bridge on 127.0.0.1:9050)
-        bool isTunnelActive = await IsLocalTunnelActiveAsync(9050, 100);
+        // 1. While Zion's tunnel is up, the download goes through its SOCKS entry (with the session login)
+        var tunnel = TunRoutingEngine.ActiveLocal;
 
-        // 2. Primary attempt: Direct connection (or active SOCKS5 VPN tunnel if running)
-        var result = await ExecuteFetchAsync(uri, url, deviceHwid, isRelay: false, isTunnelActive: isTunnelActive, ct: ct);
+        // 2. Primary attempt: through the tunnel if it is running, otherwise direct
+        var result = await ExecuteFetchAsync(uri, url, deviceHwid, isRelay: false, tunnel: tunnel, ct: ct);
         if (result.Items.Count > 0 || result.IsFinal)
         {
             return result;
@@ -1135,7 +1135,7 @@ public static class ProxyParser
             if (Uri.TryCreate(relayUrl, UriKind.Absolute, out var relayUri))
             {
                 System.Diagnostics.Debug.WriteLine($"[ProxyParser] Direct fetch failed. Attempting fallback via Cloudflare Relay: {relayUrl}");
-                var relayed = await ExecuteFetchAsync(relayUri, url, deviceHwid, isRelay: true, isTunnelActive: false, ct: ct);
+                var relayed = await ExecuteFetchAsync(relayUri, url, deviceHwid, isRelay: true, tunnel: null, ct: ct);
                 if (relayed.Items.Count > 0)
                 {
                     System.Diagnostics.Debug.WriteLine($"[ProxyParser] Cloudflare Relay SUCCESS: Loaded {relayed.Items.Count} proxies!");
@@ -1192,34 +1192,20 @@ public static class ProxyParser
         return value.Length > 60 ? value[..60] : value;
     }
 
-    private static async Task<bool> IsLocalTunnelActiveAsync(int port = 9050, int timeoutMs = 80)
-    {
-        try
-        {
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            using var cts = new CancellationTokenSource(timeoutMs);
-            await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), cts.Token);
-            return socket.Connected;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     private static async Task<SubscriptionFetchResult> ExecuteFetchAsync(
         Uri targetUri,
         string originalUrl,
         string deviceHwid,
         bool isRelay,
-        bool isTunnelActive,
+        LocalEndpoints? tunnel,
         CancellationToken ct)
     {
         var items = new List<ProxyItem>();
         string error = "Сервер подписки не отвечает";
         TimeSpan timeout = isRelay
             ? TimeSpan.FromSeconds(8)
-            : (isTunnelActive ? TimeSpan.FromSeconds(5) : TimeSpan.FromMilliseconds(1500));
+            : (tunnel != null ? TimeSpan.FromSeconds(5) : TimeSpan.FromMilliseconds(1500));
 
         foreach (var ua in UserAgentsToTry)
         {
@@ -1232,9 +1218,9 @@ public static class ProxyParser
                     ConnectTimeout = timeout
                 };
 
-                if (isTunnelActive)
+                if (tunnel != null)
                 {
-                    handler.Proxy = new WebProxy("socks5://127.0.0.1:9050");
+                    handler.Proxy = new WebProxy($"socks5://127.0.0.1:{tunnel.SocksPort}") { Credentials = tunnel.SocksCredential };
                 }
                 else if (KillSwitchFirewall.IsArmed)
                 {
@@ -1325,7 +1311,7 @@ public static class ProxyParser
 
                 // Network drop / TSPPU reset / connection timeout on direct attempt:
                 // Immediately abort the UA loop so we don't waste 5 * 1.5s waiting for nothing.
-                if (!isRelay && !isTunnelActive)
+                if (!isRelay && tunnel == null)
                 {
                     System.Diagnostics.Debug.WriteLine($"[ProxyParser] Direct connection failed ({ex.Message}). Aborting UA loop to try relay.");
                     break;

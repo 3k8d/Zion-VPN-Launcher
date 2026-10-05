@@ -13,12 +13,12 @@ public sealed record DohTarget(string Name, string Ip, string Host, string Path)
 
 /// <summary>
 /// Checks DNS-over-HTTPS servers the way the tunnel actually uses them: through the VPN (via the
-/// core's local SOCKS port), over TLS to the provider's host name, with a real DNS question.
-/// A server that only accepts a TCP connection but does not answer DNS counts as failed.
+/// core's local SOCKS entry, which requires the session's login), over TLS to the provider's host
+/// name, with a real DNS question. A server that only accepts a TCP connection but does not answer
+/// DNS counts as failed.
 /// </summary>
 public static class DohProbe
 {
-    public const int DefaultSocksPort = 9050;
     private const string TestName = "example.com";
 
     /// <summary>Every server Zion knows, primary and backup addresses, in the providers' order.</summary>
@@ -50,7 +50,7 @@ public static class DohProbe
     }
 
     /// <summary>Round-trip time in ms of a real DNS answer through the tunnel, or null if it failed.</summary>
-    public static async Task<int?> ProbeAsync(DohTarget target, int socksPort = DefaultSocksPort, int timeoutMs = 4000, CancellationToken ct = default)
+    public static async Task<int?> ProbeAsync(DohTarget target, LocalEndpoints tunnel, int timeoutMs = 4000, CancellationToken ct = default)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeoutMs);
@@ -58,10 +58,10 @@ public static class DohProbe
         try
         {
             using var tcp = new TcpClient { NoDelay = true };
-            await tcp.ConnectAsync(IPAddress.Loopback, socksPort, cts.Token).ConfigureAwait(false);
+            await tcp.ConnectAsync(IPAddress.Loopback, tunnel.SocksPort, cts.Token).ConfigureAwait(false);
             var net = tcp.GetStream();
 
-            await Socks5ConnectAsync(net, IPAddress.Parse(target.Ip), 443, cts.Token).ConfigureAwait(false);
+            await Socks5ConnectAsync(net, IPAddress.Parse(target.Ip), 443, tunnel.SocksUser, tunnel.SocksPassword, cts.Token).ConfigureAwait(false);
 
             using var tls = new SslStream(net, leaveInnerStreamOpen: false);
             await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
@@ -94,10 +94,10 @@ public static class DohProbe
     }
 
     /// <summary>Checks all targets at once; working ones come back fastest first.</summary>
-    public static async Task<List<(DohTarget Target, int Ms)>> RankAsync(IEnumerable<DohTarget> targets, int socksPort = DefaultSocksPort, CancellationToken ct = default)
+    public static async Task<List<(DohTarget Target, int Ms)>> RankAsync(IEnumerable<DohTarget> targets, LocalEndpoints tunnel, CancellationToken ct = default)
     {
         var list = targets.ToList();
-        var results = await Task.WhenAll(list.Select(t => ProbeAsync(t, socksPort, 4000, ct))).ConfigureAwait(false);
+        var results = await Task.WhenAll(list.Select(t => ProbeAsync(t, tunnel, 4000, ct))).ConfigureAwait(false);
         return list.Zip(results)
                    .Where(p => p.Second.HasValue)
                    .Select(p => (p.First, p.Second!.Value))
@@ -107,11 +107,16 @@ public static class DohProbe
 
     // ------------------------------------------------------------------ plumbing (internal for tests)
 
-    private static async Task Socks5ConnectAsync(Stream s, IPAddress ip, int port, CancellationToken ct)
+    /// <summary>SOCKS5 CONNECT with login and password (RFC 1928 + RFC 1929).</summary>
+    internal static async Task Socks5ConnectAsync(Stream s, IPAddress ip, int port, string user, string password, CancellationToken ct)
     {
-        await s.WriteAsync(new byte[] { 5, 1, 0 }, ct).ConfigureAwait(false);          // version 5, one method: no auth
+        await s.WriteAsync(new byte[] { 5, 1, 2 }, ct).ConfigureAwait(false);          // version 5, one method: login/password
         byte[] hello = await ReadExactAsync(s, 2, ct).ConfigureAwait(false);
-        if (hello[0] != 5 || hello[1] != 0) throw new IOException("SOCKS: no-auth refused");
+        if (hello[0] != 5 || hello[1] != 2) throw new IOException("SOCKS: login method refused");
+
+        await s.WriteAsync(BuildSocksLogin(user, password), ct).ConfigureAwait(false);
+        byte[] status = await ReadExactAsync(s, 2, ct).ConfigureAwait(false);
+        if (status[1] != 0) throw new IOException("SOCKS: login rejected");
 
         byte[] addr = ip.GetAddressBytes();
         var req = new List<byte> { 5, 1, 0, (byte)(addr.Length == 4 ? 1 : 4) };
@@ -129,6 +134,20 @@ public static class DohProbe
             rest = len + 2;
         }
         await ReadExactAsync(s, rest, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>RFC 1929 request: version 1, then length-prefixed login and password (each 1..255 bytes).</summary>
+    internal static byte[] BuildSocksLogin(string user, string password)
+    {
+        byte[] u = Encoding.UTF8.GetBytes(user);
+        byte[] p = Encoding.UTF8.GetBytes(password);
+        if (u.Length is 0 or > 255 || p.Length is 0 or > 255) throw new ArgumentException("SOCKS login must be 1..255 bytes");
+
+        var req = new List<byte>(3 + u.Length + p.Length) { 1, (byte)u.Length };
+        req.AddRange(u);
+        req.Add((byte)p.Length);
+        req.AddRange(p);
+        return req.ToArray();
     }
 
     /// <summary>Bytes left in a SOCKS5 reply after its 4-byte head: address + port; -1 = length byte follows.</summary>

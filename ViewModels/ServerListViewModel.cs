@@ -53,6 +53,9 @@ public class ServerListViewModel : INotifyPropertyChanged
     public ICommand RefreshSubscriptionCommand { get; }
     public ICommand UndoDeleteCommand { get; }
 
+    /// <summary>A real page through every server; dead ones are marked on their cards.</summary>
+    public ICommand CheckServersCommand { get; }
+
     private bool _isRefreshingSub = false;
 
     public ServerListViewModel(MainViewModel mainVm)
@@ -61,6 +64,8 @@ public class ServerListViewModel : INotifyPropertyChanged
 
         RefreshSubscriptionCommand = new RelayCommand(async _ => await RefreshSubscriptionAsync(), _ => !_isRefreshingSub);
         UndoDeleteCommand = new RelayCommand(_ => ExecuteUndo());
+        CheckServersCommand = new RelayCommand(async _ => await _mainVm.CheckServersAsync(),
+            _ => !_mainVm.IsCheckingServers && ServerCount > 0);
         AskDeleteAllCommand = new RelayCommand(_ => AskDeleteAll(), _ => _mainVm.DeletableProxyCount > 0);
         CancelDeleteAllCommand = new RelayCommand(_ => IsDeleteAllConfirmOpen = false);
         ConfirmDeleteAllCommand = new RelayCommand(_ => ConfirmDeleteAll());
@@ -88,13 +93,6 @@ public class ServerListViewModel : INotifyPropertyChanged
     private void OnProxyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(ProxyItem.IsFavorite) or nameof(ProxyItem.Name) or nameof(ProxyItem.IsFromSubscription)) SyncOrder();
-    }
-
-    /// <summary>Favourites first, then the rest; inside each group the saved order is kept.</summary>
-    public static List<ProxyItem> FavoritesFirst(IEnumerable<ProxyItem> proxies)
-    {
-        var list = proxies.ToList();
-        return list.Where(p => p.IsFavorite).Concat(list.Where(p => !p.IsFavorite)).ToList();
     }
 
     /// <summary>One section of the list: its key, title and members in the saved order.</summary>

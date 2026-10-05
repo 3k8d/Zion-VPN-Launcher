@@ -1,5 +1,7 @@
-﻿using System.Net.Http;
+﻿using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -12,16 +14,15 @@ public class ClashDelayResult
     public int DelayMs { get; set; } = -1;
     public int StatusCode { get; set; }
     public string ErrorMessage { get; set; } = "";
-    public bool IsTimeout { get; set; }
 }
 
 public class ClashApiClient : IDisposable
 {
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _wsCts;
-    private readonly string _baseUrl;
-    private readonly string _wsUrl;
+    private string _baseUrl = "";
+    private string _wsUrl = "";
     private string _secret = "";
 
     public event Action<long, long>? OnTraffic;
@@ -29,18 +30,17 @@ public class ClashApiClient : IDisposable
     /// <summary>Total bytes (up + down) that went through the VPN server since the stream was started.</summary>
     public event Action<long>? OnProxiedTotal;
 
-    public ClashApiClient(int port = 9090)
+    /// <summary>Not usable until <see cref="Configure"/> names the session's port and secret.</summary>
+    public ClashApiClient() { }
+
+    public ClashApiClient(int port, string secret) => Configure(port, secret);
+
+    /// <summary>Points the client at a core's control API (each session has its own port and secret).</summary>
+    public void Configure(int port, string secret)
     {
         _baseUrl = $"http://127.0.0.1:{port}";
         _wsUrl = $"ws://127.0.0.1:{port}/traffic";
-    }
-
-    public void SetSecret(string secret)
-    {
         _secret = secret;
-        _http.DefaultRequestHeaders.Authorization = !string.IsNullOrEmpty(secret)
-            ? new AuthenticationHeaderValue("Bearer", secret)
-            : null;
     }
 
     public async Task<bool> IsAliveAsync(int timeoutMs = 500)
@@ -203,14 +203,9 @@ public class ClashApiClient : IDisposable
                 result.ErrorMessage = content;
             }
 
-            if (result.ErrorMessage.Contains("timeout", StringComparison.OrdinalIgnoreCase) || result.StatusCode == 408 || result.StatusCode == 504)
-            {
-                result.IsTimeout = true;
-            }
         }
         catch (OperationCanceledException)
         {
-            result.IsTimeout = true;
             result.ErrorMessage = "Превышено время ожидания ответа от Clash API (таймаут).";
         }
         catch (Exception ex)
@@ -219,6 +214,61 @@ public class ClashApiClient : IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Asks the core's own DNS (the servers its config names) for the IPv4 addresses of a name.
+    /// Status is the DNS response code (0 = fine, 3 = no such name); -1 = the core could not answer.
+    /// </summary>
+    public async Task<(int Status, List<IPAddress> Addresses)> QueryDnsAsync(string name, int timeoutMs = 4000)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(timeoutMs);
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/dns/query?name={Uri.EscapeDataString(name)}&type=A");
+            if (!string.IsNullOrEmpty(_secret))
+            {
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _secret);
+            }
+
+            using var resp = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode) return (-1, new List<IPAddress>());
+            return ParseDnsAnswer(await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false));
+        }
+        catch
+        {
+            return (-1, new List<IPAddress>());
+        }
+    }
+
+    /// <summary>Reads the core's /dns/query reply: {"Status":0,"Answer":[{"type":1,"data":"1.2.3.4"},...]}.</summary>
+    internal static (int Status, List<IPAddress> Addresses) ParseDnsAnswer(string json)
+    {
+        var addresses = new List<IPAddress>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            int status = root.TryGetProperty("Status", out var s) && s.TryGetInt32(out int code) ? code : -1;
+
+            if (root.TryGetProperty("Answer", out var answers) && answers.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var a in answers.EnumerateArray())
+                {
+                    if (a.TryGetProperty("type", out var t) && t.TryGetInt32(out int type) && type == 1 &&
+                        a.TryGetProperty("data", out var d) && IPAddress.TryParse(d.GetString(), out var ip) &&
+                        ip.AddressFamily == AddressFamily.InterNetwork && !addresses.Contains(ip))
+                    {
+                        addresses.Add(ip);
+                    }
+                }
+            }
+            return (status, addresses);
+        }
+        catch
+        {
+            return (-1, addresses);
+        }
     }
 
     public void Dispose()
