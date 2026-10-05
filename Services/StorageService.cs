@@ -26,6 +26,9 @@ public class AppConfig
 
     /// <summary>Programs whose traffic always bypasses the VPN.</summary>
     public List<ExcludedApp> DirectApps { get; set; } = new();
+
+    /// <summary>Sites (with their subdomains) that always bypass the VPN, e.g. "kinopoisk.ru".</summary>
+    public List<string> DirectSites { get; set; } = new();
     public DnsProvider SelectedDns { get; set; } = DnsProvider.Auto;
     public bool AutoFailover { get; set; } = false;
     public bool AutoServerFailover { get => AutoFailover; set => AutoFailover = value; }

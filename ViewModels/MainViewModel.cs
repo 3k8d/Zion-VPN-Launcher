@@ -548,6 +548,7 @@ public class MainViewModel : INotifyPropertyChanged
                 OnPropertyChanged(nameof(IsSettingsVisible));
                 OnPropertyChanged(nameof(IsSubscriptionsVisible));
                 OnPropertyChanged(nameof(IsExclusionsVisible));
+                OnPropertyChanged(nameof(IsExcludedSitesVisible));
                 OnScreenChanged(value);
             }
         }
@@ -559,23 +560,26 @@ public class MainViewModel : INotifyPropertyChanged
     public bool IsSettingsVisible => CurrentScreen == AppScreen.Settings;
     public bool IsSubscriptionsVisible => CurrentScreen == AppScreen.Subscriptions;
     public bool IsExclusionsVisible => CurrentScreen == AppScreen.Exclusions;
+    public bool IsExcludedSitesVisible => CurrentScreen == AppScreen.ExcludedSites;
 
     public ServerListViewModel ServerListVm { get; }
     public SubscriptionsViewModel SubscriptionsVm { get; }
     public ExcludedAppsViewModel ExcludedAppsVm { get; }
+    public ExcludedSitesViewModel ExcludedSitesVm { get; }
 
-    // Several programs are often added one after another: restart the tunnel once, after a short pause
-    private readonly DispatcherTimer _directAppsReconnectTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+    // Several programs or sites are often added one after another: restart the tunnel once, after a short pause
+    private readonly DispatcherTimer _routingReconnectTimer = new() { Interval = TimeSpan.FromSeconds(2) };
 
-    /// <summary>Hands the excluded-programs list to the core and restarts a running tunnel to apply it.</summary>
-    public void ApplyDirectApps()
+    /// <summary>Hands the excluded programs and sites to the core and restarts a running tunnel to apply them.</summary>
+    public void ApplyRoutingExceptions()
     {
         SaveConfig();
         _controller.DirectApps = TunRoutingEngine.SanitizeDirectApps(Config.DirectApps.Select(a => a.ProcessName));
+        _controller.DirectSites = DirectSites.Sanitize(Config.DirectSites);
         if (IsConnected)
         {
-            _directAppsReconnectTimer.Stop();
-            _directAppsReconnectTimer.Start();
+            _routingReconnectTimer.Stop();
+            _routingReconnectTimer.Start();
         }
     }
 
@@ -622,6 +626,7 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand NavigateToSettingsCommand { get; }
     public ICommand OpenSubscriptionsCommand { get; }
     public ICommand OpenExclusionsCommand { get; }
+    public ICommand OpenExcludedSitesCommand { get; }
     public ICommand OpenDnsModalCommand { get; }
     public ICommand CloseDnsModalCommand { get; }
     public ICommand SelectDnsCommand { get; }
@@ -634,10 +639,12 @@ public class MainViewModel : INotifyPropertyChanged
         ServerListVm = new ServerListViewModel(this);
         SubscriptionsVm = new SubscriptionsViewModel(this);
         ExcludedAppsVm = new ExcludedAppsViewModel(this);
+        ExcludedSitesVm = new ExcludedSitesViewModel(this);
         _controller.DirectApps = TunRoutingEngine.SanitizeDirectApps(config.DirectApps.Select(a => a.ProcessName));
-        _directAppsReconnectTimer.Tick += async (_, _) =>
+        _controller.DirectSites = DirectSites.Sanitize(config.DirectSites);
+        _routingReconnectTimer.Tick += async (_, _) =>
         {
-            _directAppsReconnectTimer.Stop();
+            _routingReconnectTimer.Stop();
             await ReconnectWithCurrentConfigAsync();
         };
 
@@ -699,6 +706,7 @@ public class MainViewModel : INotifyPropertyChanged
         NavigateToSettingsCommand = new RelayCommand(_ => CurrentScreen = AppScreen.Settings);
         OpenSubscriptionsCommand = new RelayCommand(_ => CurrentScreen = AppScreen.Subscriptions);
         OpenExclusionsCommand = new RelayCommand(_ => CurrentScreen = AppScreen.Exclusions);
+        OpenExcludedSitesCommand = new RelayCommand(_ => CurrentScreen = AppScreen.ExcludedSites);
 
         CopyLogsCommand = new RelayCommand(_ => CopyLogs());
 

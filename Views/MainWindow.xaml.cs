@@ -462,7 +462,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            if (_vm.IsExclusionsVisible)
+            if (_vm.IsExclusionsVisible || _vm.IsExcludedSitesVisible)
             {
                 _vm.CurrentScreen = AppScreen.Settings;
                 e.Handled = true;

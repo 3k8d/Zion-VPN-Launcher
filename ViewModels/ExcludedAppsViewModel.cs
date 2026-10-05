@@ -172,7 +172,7 @@ public class ExcludedAppsViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsEmpty));
         OnPropertyChanged(nameof(Count));
         OnPropertyChanged(nameof(Summary));
-        _main.ApplyDirectApps();
+        _main.ApplyRoutingExceptions();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

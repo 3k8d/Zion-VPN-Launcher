@@ -355,7 +355,8 @@ public class TunRoutingEngine
         Guid sessionId = default,
         CancellationToken cancellationToken = default,
         IReadOnlyCollection<string>? directApps = null,
-        DohTarget? preferredDns = null)
+        DohTarget? preferredDns = null,
+        IReadOnlyCollection<string>? directSites = null)
     {
         await _syncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -402,7 +403,7 @@ public class TunRoutingEngine
             ActiveDnsName = ActiveDnsTarget.Name;
 
             // 3. Generate configuration with optimized DNS provider order and security flags
-            var config = GenerateSingBoxConfig(proxy, bypassTorrents, bypassDomesticRu, CurrentClashSecret, dnsProvider, autoDnsOrder, blockQuic, blockWebRtc, blockTrackers, directApps);
+            var config = GenerateSingBoxConfig(proxy, bypassTorrents, bypassDomesticRu, CurrentClashSecret, dnsProvider, autoDnsOrder, blockQuic, blockWebRtc, blockTrackers, directApps, directSites);
             if (directApps is { Count: > 0 })
             {
                 OnLog?.Invoke($"Мимо VPN идут программы: {string.Join(", ", directApps)}");
@@ -692,7 +693,7 @@ public class TunRoutingEngine
         return results.OrderBy(r => r.LatencyMs).ToList();
     }
 
-    public static JsonObject GenerateSingBoxConfig(ProxyItem proxy, bool bypassTorrents = false, bool bypassDomesticRu = false, string clashSecret = "", DnsProvider dnsProvider = DnsProvider.Auto, List<DnsBenchmarkResult>? autoDnsOrder = null, bool blockQuic = false, bool blockWebRtc = false, bool blockTrackers = false, IReadOnlyCollection<string>? directApps = null)
+    public static JsonObject GenerateSingBoxConfig(ProxyItem proxy, bool bypassTorrents = false, bool bypassDomesticRu = false, string clashSecret = "", DnsProvider dnsProvider = DnsProvider.Auto, List<DnsBenchmarkResult>? autoDnsOrder = null, bool blockQuic = false, bool blockWebRtc = false, bool blockTrackers = false, IReadOnlyCollection<string>? directApps = null, IReadOnlyCollection<string>? directSites = null)
     {
         string host = proxy.CleanHost;
         int port = proxy.Port;
@@ -739,6 +740,28 @@ public class TunRoutingEngine
             dnsRules.Add(new JsonObject
             {
                 ["process_path_regex"] = new JsonArray { torrentPattern },
+                ["server"] = "direct-dns"
+            });
+        }
+
+        // 1a. Sites the user sends around the VPN (with subdomains). Ahead of every other rule, so
+        //     "Обход РФ", tracker blocking and the QUIC block never override the user's own choice.
+        //     Their names are resolved by the local resolver too, so CDNs pick servers near the user.
+        var sites = DirectSites.Sanitize(directSites);
+        if (sites.Count > 0)
+        {
+            var siteList = new JsonArray();
+            foreach (string d in sites) siteList.Add(d);
+
+            routeRules.Add(new JsonObject
+            {
+                ["domain_suffix"] = siteList,
+                ["outbound"] = "direct-out"
+            });
+
+            dnsRules.Add(new JsonObject
+            {
+                ["domain_suffix"] = siteList.DeepClone(),
                 ["server"] = "direct-dns"
             });
         }

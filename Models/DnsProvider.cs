@@ -1,4 +1,4 @@
-namespace Zion.Models;
+﻿namespace Zion.Models;
 
 public enum AppScreen
 {
@@ -7,7 +7,8 @@ public enum AppScreen
     ServerEdit,
     Settings,
     Subscriptions,
-    Exclusions
+    Exclusions,
+    ExcludedSites
 }
 
 public enum DnsProvider

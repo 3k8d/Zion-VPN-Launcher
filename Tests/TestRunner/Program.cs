@@ -60,6 +60,7 @@ class Program
         TestExcludedPrograms();
         TestVlessTlsHandshake();
         TestDnsFailover();
+        TestDirectSites();
 
         Console.WriteLine("\n=======================================================");
         Console.WriteLine($"RESULTS: {_passed} Passed, {_failed} Failed");
@@ -998,6 +999,61 @@ class Program
         Assert(expired.Text.StartsWith("истекла") && expired.IsWarning, "Expired subscription is highlighted");
         Assert(SubscriptionsViewModel.Servers(1) == "1 сервер" && SubscriptionsViewModel.Servers(3) == "3 сервера" && SubscriptionsViewModel.Servers(11) == "11 серверов" && SubscriptionsViewModel.Servers(24) == "24 сервера", "Russian plural forms");
         Assert(SubscriptionsViewModel.When(day.AddHours(-2), day) == "сегодня в 10:00" && SubscriptionsViewModel.When(day.AddDays(-1), day) == "вчера в 12:00", "Update time wording");
+    }
+
+    static void TestDirectSites()
+    {
+        Console.WriteLine("\n--- 25. Sites that bypass the VPN ---");
+
+        // Whatever the user pastes becomes a bare site name
+        string? N(string s) => DirectSites.Normalize(s, out _);
+        Assert(N("kinopoisk.ru") == "kinopoisk.ru", "Plain site name is kept");
+        Assert(N("https://www.kinopoisk.ru/film/123?x=1#top") == "kinopoisk.ru", "Full link -> site name, www. dropped");
+        Assert(N("  WWW.Sberbank.RU/ ") == "sberbank.ru", "Spaces, capitals and trailing slash are cleaned");
+        Assert(N("*.vk.com") == "vk.com" && N(".vk.com") == "vk.com", "Wildcard notation is understood");
+        Assert(N("music.yandex.ru:443") == "music.yandex.ru", "Port is dropped, subdomain kept as typed");
+        Assert(N("кинопоиск.рф") == "xn--h1aaecngahu.xn--p1ai", "Cyrillic domain is converted for the core");
+        Assert(DirectSites.Display("xn--h1aaecngahu.xn--p1ai") == "кинопоиск.рф", "...and shown back in Cyrillic");
+        Assert(N("") == null && N("hello") == null && N("1.2.3.4") == null && N("-bad-.com") == null && N("a..b") == null, "Garbage, single words and IPs are refused");
+        DirectSites.Normalize("8.8.8.8", out string ipError);
+        Assert(ipError.Contains("IP"), "Refusing an IP says why");
+        Assert(DirectSites.Sanitize(new[] { "vk.com", "https://vk.com/feed", "bad", "ok.ru" }).SequenceEqual(new[] { "vk.com", "ok.ru" }), "List is de-duplicated and cleaned");
+
+        // In the core config: before everything that could override it
+        var proxy = new ProxyItem { Host = "1.2.3.4", Port = 443, Protocol = ProxyProtocol.Trojan, Password = "p", Sni = "example.com" };
+        var cfg = TunRoutingEngine.GenerateSingBoxConfig(proxy, bypassTorrents: true, bypassDomesticRu: true, blockQuic: true, blockTrackers: true,
+            directSites: new[] { "kinopoisk.ru", "https://www.example.org/x" });
+        var rules = cfg["route"]?["rules"]?.AsArray() ?? new JsonArray();
+        int siteIdx = -1, ruIdx = -1, quicIdx = -1, trackersIdx = -1;
+        for (int i = 0; i < rules.Count; i++)
+        {
+            string r = rules[i]!.ToJsonString();
+            if (r.Contains("kinopoisk.ru") && r.Contains("direct-out") && siteIdx < 0) siteIdx = i;
+            if (r.Contains("\"ru\"") && ruIdx < 0) ruIdx = i;
+            if (r.Contains("\"udp\"") && r.Contains("443") && r.Contains("reject") && quicIdx < 0) quicIdx = i;
+            if (r.Contains("google-analytics.com") && trackersIdx < 0) trackersIdx = i;
+        }
+        Assert(siteIdx >= 0 && rules[siteIdx]!.ToJsonString().Contains("example.org"), "User sites get one direct rule (links cleaned)");
+        Assert(siteIdx < ruIdx && siteIdx < quicIdx && siteIdx < trackersIdx, "That rule comes before 'Обход РФ', the QUIC block and tracker blocking");
+        Assert((cfg["dns"]?["rules"]?.ToJsonString() ?? "").Contains("kinopoisk.ru"), "Their names are resolved by the local resolver");
+        Assert(!(TunRoutingEngine.GenerateSingBoxConfig(proxy)["route"]?["rules"]?.ToJsonString() ?? "").Contains("example.org"), "No sites -> no extra rule");
+        Assert(new AppConfig().DirectSites.Count == 0, "The list starts empty");
+
+        if (File.Exists(TunRoutingEngine.SingBoxExePath))
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), $"singbox_sites_{Guid.NewGuid():N}.json");
+            try
+            {
+                File.WriteAllText(tmp, cfg.ToJsonString());
+                var psi = new ProcessStartInfo(TunRoutingEngine.SingBoxExePath, $"check -c \"{tmp}\"")
+                { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                using var proc = Process.Start(psi)!;
+                string err = proc.StandardError.ReadToEnd() + proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                Assert(proc.ExitCode == 0, "Native sing-box check passes with user sites", err);
+            }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
     }
 
     static void TestDnsFailover()

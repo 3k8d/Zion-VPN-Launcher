@@ -46,6 +46,9 @@ public class ConnectionController : IDisposable
     /// <summary>Exe names whose traffic bypasses the VPN; applied on the next (re)connect.</summary>
     public IReadOnlyCollection<string> DirectApps { get; set; } = Array.Empty<string>();
 
+    /// <summary>Sites (with subdomains) that bypass the VPN; applied on the next (re)connect.</summary>
+    public IReadOnlyCollection<string> DirectSites { get; set; } = Array.Empty<string>();
+
     public bool IsLinkHealthy { get; private set; } = true;
 
     /// <summary>Set together with an unhealthy link when the cause is the network itself, not the server.</summary>
@@ -362,7 +365,7 @@ public class ConnectionController : IDisposable
                 }
 
                 // Step 2: Start TUN Core with Native Validation & Clash Delay Ready-Check
-                var (success, error) = await _tun.StartAsync(proxy, bypassTorrents, bypassDomesticRu, dns, blockQuic, blockWebRtc, blockTrackers, sessionId, ct, DirectApps, _preferredDns).ConfigureAwait(false);
+                var (success, error) = await _tun.StartAsync(proxy, bypassTorrents, bypassDomesticRu, dns, blockQuic, blockWebRtc, blockTrackers, sessionId, ct, DirectApps, _preferredDns, DirectSites).ConfigureAwait(false);
 
                 if (sessionId != _currentSessionId || ct.IsCancellationRequested)
                 {
@@ -467,7 +470,7 @@ public class ConnectionController : IDisposable
                 }
 
                 // Step 2: Start new session tunnel
-                var (success, error) = await _tun.StartAsync(newProxy, bypassTorrents, bypassDomesticRu, dns, blockQuic, blockWebRtc, blockTrackers, sessionId, ct, DirectApps, _preferredDns).ConfigureAwait(false);
+                var (success, error) = await _tun.StartAsync(newProxy, bypassTorrents, bypassDomesticRu, dns, blockQuic, blockWebRtc, blockTrackers, sessionId, ct, DirectApps, _preferredDns, DirectSites).ConfigureAwait(false);
 
                 if (sessionId != _currentSessionId || ct.IsCancellationRequested)
                 {
