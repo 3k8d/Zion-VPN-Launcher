@@ -2,12 +2,12 @@
 
 Zion ships the following components inside `Zion.exe`.
 
-## sing-box 1.13.19
+## sing-box 1.14.2
 
 - File: `Core/sing-box.gz` (the official Windows amd64 build, compressed)
 - Project: https://github.com/SagerNet/sing-box
 - License: GNU General Public License v3.0 or later
-- Source code of this exact version: https://github.com/SagerNet/sing-box/tree/v1.13.19
+- Source code of this exact version: https://github.com/SagerNet/sing-box/tree/v1.14.2
 
 sing-box runs as a separate process; Zion only generates its configuration and talks to it over its local API.
 
