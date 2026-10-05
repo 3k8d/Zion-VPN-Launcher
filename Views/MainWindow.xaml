@@ -4,6 +4,7 @@
         xmlns:vm="clr-namespace:Zion.ViewModels"
         xmlns:views="clr-namespace:Zion.Views"
         xmlns:conv="clr-namespace:Zion.Views.Converters"
+        xmlns:models="clr-namespace:Zion.Models"
         Title="Zion" Width="461" Height="696" MinHeight="696"
         WindowStartupLocation="CenterScreen"
         Background="Transparent" Foreground="#F4F6FB"
@@ -1067,7 +1068,7 @@
                         <TextBlock Text="Серверы" FontSize="15.5" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}"
                                    VerticalAlignment="Center" FontFamily="Segoe UI Variable Display, Segoe UI"/>
                         <Border Style="{StaticResource Pill}" Margin="9,1,0,0">
-                            <TextBlock Text="{Binding Proxies.Count}" FontSize="10.5" FontWeight="Bold" Foreground="{StaticResource AccentHi}"/>
+                            <TextBlock Text="{Binding ServerListVm.ServerCount}" FontSize="10.5" FontWeight="Bold" Foreground="{StaticResource AccentHi}"/>
                         </Border>
                     </StackPanel>
 
@@ -1102,7 +1103,7 @@
                 </DockPanel>
 
                 <Grid Grid.Row="1" Margin="0,0,0,10">
-                    <ListBox ItemsSource="{Binding ServerListVm.OrderedProxies}"
+                    <ListBox ItemsSource="{Binding ServerListVm.ListItems}"
                              ItemContainerStyle="{StaticResource ModernListBoxItem}"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -1110,8 +1111,30 @@
                              VirtualizingStackPanel.VirtualizationMode="Recycling"
                              Background="Transparent" BorderThickness="0"
                              Padding="0,0,4,0">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
+                        <ListBox.Resources>
+                            <!-- Section title: favourites, a subscription, manual servers -->
+                            <DataTemplate DataType="{x:Type vm:ServerGroupHeader}">
+                                <DockPanel x:Name="HeaderRow" Margin="4,10,6,0" Cursor="Arrow" Background="Transparent">
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding Count}" Style="{StaticResource Overline}"/>
+                                    <TextBlock Text="{Binding Caption}" Style="{StaticResource Overline}" TextTrimming="CharacterEllipsis"/>
+                                </DockPanel>
+                                <DataTemplate.Triggers>
+                                    <DataTrigger Binding="{Binding RelativeSource={RelativeSource PreviousData}}" Value="{x:Null}">
+                                        <Setter TargetName="HeaderRow" Property="Margin" Value="4,2,6,0"/>
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+
+                            <!-- A provider's own divider ("Белые списки ниже") -->
+                            <DataTemplate DataType="{x:Type vm:ServerSubHeader}">
+                                <DockPanel Margin="4,4,6,0" Cursor="Arrow" Background="Transparent">
+                                    <TextBlock Text="{Binding Title}" FontSize="11.5" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"
+                                               TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                                    <Border Height="1" Background="{StaticResource Stroke}" VerticalAlignment="Center"/>
+                                </DockPanel>
+                            </DataTemplate>
+
+                            <DataTemplate DataType="{x:Type models:ProxyItem}">
                                 <Border x:Name="CardBorder" CornerRadius="16" Background="{StaticResource Glass}"
                                         BorderBrush="{StaticResource Stroke}" BorderThickness="1"
                                         Padding="12,10,8,10" MouseLeftButtonUp="Card_MouseLeftButtonUp">
@@ -1128,7 +1151,7 @@
                                         </Border>
 
                                         <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,6,0">
-                                            <TextBlock Text="{Binding CleanCountryName}" FontSize="13" FontWeight="SemiBold"
+                                            <TextBlock Text="{Binding CleanName}" FontSize="13" FontWeight="SemiBold"
                                                        Foreground="{StaticResource TextPrimary}" TextTrimming="CharacterEllipsis"/>
                                             <TextBlock Text="{Binding DisplayAddress}" FontSize="10.5" Foreground="{StaticResource TextMuted}"
                                                        TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
@@ -1197,7 +1220,7 @@
                                     </DataTrigger>
                                 </DataTemplate.Triggers>
                             </DataTemplate>
-                        </ListBox.ItemTemplate>
+                        </ListBox.Resources>
                     </ListBox>
 
                     <!-- Empty list -->
@@ -1290,7 +1313,7 @@
                             <TextBlock Text="Ссылка сервера" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}" FontSize="12.5"/>
                         </DockPanel>
                         <TextBlock Text="Вставьте готовую ссылку или скопируйте текущую" FontSize="11" Foreground="{StaticResource TextMuted}" Margin="0,0,0,9"/>
-                        <TextBox x:Name="EditQuickInputTextBox" Tag="vless://, trojan://, ss://, vmess://, подписка https://..."
+                        <TextBox x:Name="EditQuickInputTextBox" Tag="vless://, trojan://, ss://, vmess://, hysteria2://, tuic://, подписка https://..."
                                  TextChanged="EditQuickInputTextBox_TextChanged" Margin="0,0,0,8"/>
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -1330,6 +1353,8 @@
                                     <ComboBoxItem Content="Trojan"/>
                                     <ComboBoxItem Content="Shadowsocks"/>
                                     <ComboBoxItem Content="VMess"/>
+                                    <ComboBoxItem Content="Hysteria2"/>
+                                    <ComboBoxItem Content="TUIC"/>
                                     <ComboBoxItem Content="SOCKS5"/>
                                     <ComboBoxItem Content="HTTP"/>
                                 </ComboBox>
@@ -1441,6 +1466,53 @@
                                 </StackPanel>
                             </Grid>
                         </StackPanel>
+
+                        <!-- Hysteria2 / TUIC -->
+                        <StackPanel x:Name="EditQuicPanel" Visibility="Collapsed">
+                            <UniformGrid Rows="1" Margin="0,0,0,10">
+                                <StackPanel x:Name="EditTuicUuidPanel" Margin="0,0,8,0">
+                                    <TextBlock Text="Ключ пользователя (UUID)" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox x:Name="EditTuicUuidTextBox" Tag="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" TextChanged="OnEditFormFieldChanged"/>
+                                </StackPanel>
+                                <StackPanel>
+                                    <TextBlock Text="Пароль" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox x:Name="EditQuicPasswordTextBox" Tag="Пароль" TextChanged="OnEditFormFieldChanged"/>
+                                </StackPanel>
+                            </UniformGrid>
+
+                            <Border Background="{StaticResource Glass}" BorderBrush="{StaticResource Stroke}" BorderThickness="1"
+                                    CornerRadius="16" Padding="12,12,12,4" Margin="0,0,0,8">
+                                <StackPanel>
+                                    <TextBlock Text="СОЕДИНЕНИЕ" Style="{StaticResource Overline}" Foreground="{StaticResource AccentHi}" Margin="2,0,0,10"/>
+                                    <Grid Margin="0,0,0,10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                            <TextBlock Text="Сайт маскировки (SNI)" Style="{StaticResource FieldLabel}"/>
+                                            <TextBox x:Name="EditQuicSniTextBox" Tag="example.com" TextChanged="OnEditFormFieldChanged"/>
+                                        </StackPanel>
+                                        <StackPanel x:Name="EditObfsPanel" Grid.Column="1">
+                                            <TextBlock Text="Пароль обфускации" Style="{StaticResource FieldLabel}"/>
+                                            <TextBox x:Name="EditObfsPasswordTextBox" Tag="Salamander" TextChanged="OnEditFormFieldChanged"/>
+                                        </StackPanel>
+                                        <StackPanel x:Name="EditCongestionPanel" Grid.Column="1" Visibility="Collapsed">
+                                            <TextBlock Text="Контроль перегрузки" Style="{StaticResource FieldLabel}"/>
+                                            <ComboBox x:Name="EditCongestionComboBox" SelectionChanged="OnEditFormFieldChanged">
+                                                <ComboBoxItem Content="BBR" IsSelected="True"/>
+                                                <ComboBoxItem Content="Cubic"/>
+                                                <ComboBoxItem Content="New_Reno"/>
+                                            </ComboBox>
+                                        </StackPanel>
+                                    </Grid>
+                                    <StackPanel x:Name="EditHopPortsPanel" Margin="0,0,0,8">
+                                        <TextBlock Text="Диапазон портов" Style="{StaticResource FieldLabel}"/>
+                                        <TextBox x:Name="EditHopPortsTextBox" Tag="20000-30000" TextChanged="OnEditFormFieldChanged"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
 
@@ -1498,10 +1570,7 @@
                                   Content="Автопереключение сервера"
                                   Tag="Переход на другой сервер, если текущий недоступен"
                                   IsChecked="{Binding AutoServerFailover}"/>
-                        <CheckBox Style="{StaticResource SettingRow}"
-                                  Content="Запускать вместе с Windows"
-                                  Tag="Автоматически при входе в систему"
-                                  IsChecked="{Binding AutoStartWithWindows}"/>
+
 
                         <TextBlock Text="ИСКЛЮЧЕНИЯ" Style="{StaticResource Overline}" Margin="4,10,0,8"/>
                         <Button Style="{StaticResource CardButton}" Command="{Binding OpenExclusionsCommand}" Margin="0,0,0,8" Padding="14,12">

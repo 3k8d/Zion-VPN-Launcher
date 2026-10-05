@@ -91,6 +91,16 @@ public static class ProxyParser
             return ParseVmess(input);
         }
 
+        // 3a. Hysteria2 / TUIC (QUIC-based)
+        if (input.StartsWith("hysteria2://", StringComparison.OrdinalIgnoreCase) || input.StartsWith("hy2://", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseHysteria2(input);
+        }
+        if (input.StartsWith("tuic://", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseTuic(input);
+        }
+
         string name = defaultName;
         int hashIdx = input.IndexOf('#');
         if (hashIdx != -1)
@@ -331,6 +341,8 @@ public static class ProxyParser
         else if (type == "shadowsocks") proto = ProxyProtocol.Shadowsocks;
         else if (type == "vmess") proto = ProxyProtocol.Vmess;
         else if (type == "socks" || type == "socks5") proto = ProxyProtocol.Socks5;
+        else if (type == "hysteria2") proto = ProxyProtocol.Hysteria2;
+        else if (type == "tuic") proto = ProxyProtocol.Tuic;
         else return null;
 
         string uuid = ob.TryGetProperty("uuid", out var uProp) ? uProp.GetString() ?? "" :
@@ -388,6 +400,37 @@ public static class ProxyParser
             GrpcServiceName = grpcServiceName,
             Status = ProxyStatus.Unknown
         };
+
+        if (proto is ProxyProtocol.Hysteria2 or ProxyProtocol.Tuic)
+        {
+            item.TransportType = "";
+            item.Fingerprint = "";
+            item.Password = Str(ob, "password");
+            item.Uuid = proto == ProxyProtocol.Tuic ? Str(ob, "uuid") : "";
+            item.CongestionControl = Str(ob, "congestion_control");
+            item.UdpRelayMode = Str(ob, "udp_relay_mode");
+            if (ob.TryGetProperty("obfs", out var obfsElem) && obfsElem.ValueKind == JsonValueKind.Object)
+                item.ObfsPassword = Str(obfsElem, "password");
+            if (ob.TryGetProperty("server_ports", out var portsElem))
+            {
+                // sing-box writes ranges as "20000:30000", links as "20000-30000"
+                var ranges = portsElem.ValueKind == JsonValueKind.Array
+                    ? portsElem.EnumerateArray().Select(e => e.GetString() ?? "")
+                    : new[] { portsElem.GetString() ?? "" };
+                item.ServerPorts = string.Join(",", ranges.Where(r => r.Length > 0).Select(r => r.Replace(':', '-')));
+            }
+            if (ob.TryGetProperty("tls", out var qTls) && qTls.ValueKind == JsonValueKind.Object)
+            {
+                item.Insecure = qTls.TryGetProperty("insecure", out var insElem) && insElem.ValueKind == JsonValueKind.True;
+                if (qTls.TryGetProperty("alpn", out var alpnElem))
+                {
+                    item.Alpn = alpnElem.ValueKind == JsonValueKind.Array
+                        ? string.Join(",", alpnElem.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s.Length > 0))
+                        : alpnElem.GetString() ?? "";
+                }
+            }
+        }
+
         item.EnsureDeterministicId();
         item.AutoEnrichCountryIfMissing();
         return item;
@@ -588,6 +631,155 @@ public static class ProxyParser
             return null;
         }
     }
+
+    /// <summary>
+    /// hysteria2://password@host:port/?sni=..&amp;obfs=salamander&amp;obfs-password=..&amp;insecure=1#name (also hy2://).
+    /// The port part may list several ports and ranges ("443,20000-30000") for port hopping; so may mport=.
+    /// </summary>
+    public static ProxyItem? ParseHysteria2(string link)
+    {
+        if (string.IsNullOrWhiteSpace(link)) return null;
+        string scheme = link.StartsWith("hy2://", StringComparison.OrdinalIgnoreCase) ? "hy2://" :
+                        link.StartsWith("hysteria2://", StringComparison.OrdinalIgnoreCase) ? "hysteria2://" : "";
+        if (scheme.Length == 0) return null;
+
+        try
+        {
+            if (!SplitQuicLink(link[scheme.Length..], out string auth, out string host, out string portSpec, out var query, out string name))
+                return null;
+
+            var ports = portSpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            string mport = query.GetValueOrDefault("mport", "");
+            ports.AddRange(mport.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            ports = ports.Distinct().ToList();
+
+            int port = 443;
+            string? single = ports.FirstOrDefault(p => !p.Contains('-'));
+            string? first = single ?? ports.FirstOrDefault();
+            if (first != null && !int.TryParse(first.Split('-')[0], out port)) return null;
+            if (port <= 0 || port > 65535) return null;
+            bool hopping = ports.Count > 1 || ports.Any(p => p.Contains('-'));
+
+            string obfs = query.GetValueOrDefault("obfs", "");
+            string obfsPassword = query.GetValueOrDefault("obfs-password", query.GetValueOrDefault("obfs_password", ""));
+
+            return new ProxyItem
+            {
+                Name = !string.IsNullOrWhiteSpace(name) ? name : $"{host}:{port}",
+                Host = host,
+                Port = port,
+                Protocol = ProxyProtocol.Hysteria2,
+                Password = auth,
+                Security = "tls",
+                Sni = query.GetValueOrDefault("sni", query.GetValueOrDefault("peer", "")),
+                ObfsPassword = obfs.Length == 0 || obfs.Equals("salamander", StringComparison.OrdinalIgnoreCase) ? obfsPassword : "",
+                ServerPorts = hopping ? string.Join(",", ports) : "",
+                Insecure = IsTrue(query.GetValueOrDefault("insecure", query.GetValueOrDefault("allowInsecure", ""))),
+                Alpn = query.GetValueOrDefault("alpn", ""),
+                TransportType = "",
+                Fingerprint = "",
+                RawLink = link,
+                Status = ProxyStatus.Unknown
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>tuic://uuid:password@host:port?congestion_control=bbr&amp;udp_relay_mode=native&amp;alpn=h3&amp;sni=..#name</summary>
+    public static ProxyItem? ParseTuic(string link)
+    {
+        if (string.IsNullOrWhiteSpace(link) || !link.StartsWith("tuic://", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        try
+        {
+            if (!SplitQuicLink(link[7..], out string auth, out string host, out string portSpec, out var query, out string name))
+                return null;
+
+            int colon = auth.IndexOf(':');
+            if (colon <= 0) return null; // TUIC v5 needs both the UUID and the password
+            string uuid = auth[..colon].Trim();
+            string password = auth[(colon + 1)..];
+
+            int port = 443;
+            if (portSpec.Length > 0 && !int.TryParse(portSpec, out port)) return null;
+            if (port <= 0 || port > 65535) return null;
+
+            return new ProxyItem
+            {
+                Name = !string.IsNullOrWhiteSpace(name) ? name : $"{host}:{port}",
+                Host = host,
+                Port = port,
+                Protocol = ProxyProtocol.Tuic,
+                Uuid = uuid,
+                Password = password,
+                Security = "tls",
+                Sni = query.GetValueOrDefault("sni", query.GetValueOrDefault("peer", "")),
+                CongestionControl = query.GetValueOrDefault("congestion_control", query.GetValueOrDefault("congestion-control", "")).ToLowerInvariant(),
+                UdpRelayMode = query.GetValueOrDefault("udp_relay_mode", query.GetValueOrDefault("udp-relay-mode", "")).ToLowerInvariant(),
+                Insecure = IsTrue(query.GetValueOrDefault("allow_insecure", query.GetValueOrDefault("insecure", query.GetValueOrDefault("allowInsecure", "")))),
+                Alpn = query.GetValueOrDefault("alpn", ""),
+                TransportType = "",
+                Fingerprint = "",
+                RawLink = link,
+                Status = ProxyStatus.Unknown
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Splits "auth@host:ports/?query#name" (the part after the scheme) of a Hysteria2/TUIC link.</summary>
+    private static bool SplitQuicLink(string raw, out string auth, out string host, out string portSpec,
+                                      out Dictionary<string, string> query, out string name)
+    {
+        auth = host = portSpec = name = "";
+        query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        int hashIdx = raw.IndexOf('#');
+        if (hashIdx != -1)
+        {
+            name = Uri.UnescapeDataString(raw[(hashIdx + 1)..].Trim());
+            raw = raw[..hashIdx];
+        }
+
+        int qIdx = raw.IndexOf('?');
+        string main = qIdx != -1 ? raw[..qIdx] : raw;
+        if (qIdx != -1)
+        {
+            foreach (var kv in ParseQueryString(raw[(qIdx + 1)..])) query[kv.Key] = kv.Value;
+        }
+
+        int atIdx = main.LastIndexOf('@');
+        if (atIdx <= 0) return false;
+        auth = Uri.UnescapeDataString(main[..atIdx]);
+        string hostPort = main[(atIdx + 1)..].TrimEnd('/');
+
+        if (hostPort.StartsWith('['))
+        {
+            int close = hostPort.IndexOf(']');
+            if (close == -1) return false;
+            host = hostPort[1..close];
+            string after = hostPort[(close + 1)..];
+            if (after.StartsWith(':')) portSpec = after[1..];
+        }
+        else
+        {
+            int colon = hostPort.IndexOf(':');
+            host = colon != -1 ? hostPort[..colon] : hostPort;
+            if (colon != -1) portSpec = hostPort[(colon + 1)..];
+        }
+
+        return !string.IsNullOrWhiteSpace(host) && auth.Length > 0;
+    }
+
+    private static bool IsTrue(string value) =>
+        value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase);
 
     public static ProxyItem? ParseShadowsocks(string link)
     {
@@ -1181,6 +1373,9 @@ public static class ProxyParser
             return null;
         }
     }
+
+    private static string Str(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
 
     private static Dictionary<string, string> ParseQueryString(string query)
     {

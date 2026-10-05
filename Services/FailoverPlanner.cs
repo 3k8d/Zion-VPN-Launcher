@@ -16,7 +16,7 @@ public static class FailoverPlanner
         bool countryKnown = !string.IsNullOrEmpty(code) && code != "un" && code != "auto";
 
         return all
-            .Where(p => current == null || p.Id != current.Id)
+            .Where(p => (current == null || p.Id != current.Id) && !p.IsDivider)
             .OrderBy(p => countryKnown && string.Equals(p.CountryCode, code, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
             .ThenBy(p => p.IsFavorite ? 0 : 1)
             .ThenBy(p => p.Status == ProxyStatus.Offline ? 1 : 0)

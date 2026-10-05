@@ -62,6 +62,8 @@ class Program
         TestDnsFailover();
         TestDirectSites();
         TestFavorites();
+        TestServerListSections();
+        TestQuicProtocols();
 
         Console.WriteLine("\n=======================================================");
         Console.WriteLine($"RESULTS: {_passed} Passed, {_failed} Failed");
@@ -665,15 +667,13 @@ class Program
 
     static void TestAutoStartAndFailover()
     {
-        Console.WriteLine("\n--- 13. AutoStart Service & Failover Config ---");
+        Console.WriteLine("\n--- 13. Default settings ---");
 
         var config = new AppConfig();
         Assert(!config.AutoServerFailover && !config.BypassTorrents && !config.BypassDomesticRu && !config.BlockQuic && !config.BlockWebRtc && !config.BlockTrackers && !config.KillSwitch && !config.AutoUpdateSubscription,
             "Every switch is OFF by default and only works once turned on");
         Assert(config.AutoConnectOnStartup == false, "AutoConnectOnStartup is false by default");
 
-        bool autoStart = AutoStartService.IsAutoStartEnabled();
-        Assert(autoStart == false || autoStart == true, "AutoStartService.IsAutoStartEnabled returns valid boolean without error");
     }
 
     static void TestFormatTrafficAndViewModel()
@@ -1000,6 +1000,160 @@ class Program
         Assert(expired.Text.StartsWith("истекла") && expired.IsWarning, "Expired subscription is highlighted");
         Assert(SubscriptionsViewModel.Servers(1) == "1 сервер" && SubscriptionsViewModel.Servers(3) == "3 сервера" && SubscriptionsViewModel.Servers(11) == "11 серверов" && SubscriptionsViewModel.Servers(24) == "24 сервера", "Russian plural forms");
         Assert(SubscriptionsViewModel.When(day.AddHours(-2), day) == "сегодня в 10:00" && SubscriptionsViewModel.When(day.AddDays(-1), day) == "вчера в 12:00", "Update time wording");
+    }
+
+    static void TestServerListSections()
+    {
+        Console.WriteLine("\n--- 27. Server list: provider names, sections, dividers ---");
+
+        var named = new ProxyItem { Name = "🇬🇧 Великобритания N1 (YouTube без рек)", Country = "Великобритания" };
+        Assert(named.CleanName == "Великобритания N1 (YouTube без рек)", $"Flag emoji is dropped from the name (got '{named.CleanName}')");
+        Assert(new ProxyItem { Name = "Кипр 🇨🇾 2" }.CleanName == "Кипр 2", "A flag in the middle is dropped too");
+        Assert(new ProxyItem { Name = "user@203.0.113.7" }.CleanName == "user@203.0.113.7", "A name without flags stays as it is");
+        Assert(new ProxyItem { Name = "🇳🇱", Country = "Нидерланды" }.CleanName == "Нидерланды", "A name that is only a flag falls back to the country");
+
+        var divider = new ProxyItem { Name = "❗️Белые списки ниже" };
+        Assert(divider.IsDivider, "«❗️Белые списки ниже» is recognised as a divider");
+        Assert(divider.DividerTitle == "Белые списки ниже", $"Divider title has no marks (got '{divider.DividerTitle}')");
+        Assert(!new ProxyItem { Name = "🇨🇾 Белый список N3 (X5)" }.IsDivider, "A real server is not a divider");
+        Assert(!new ProxyItem { Name = "❗ Германия N1" }.IsDivider, "A mark alone does not make a divider");
+        Assert(!new ProxyItem { Name = "Сервер ниже" }.IsDivider, "A word alone does not make a divider");
+
+        const string subA = "https://a.example.net/sub/TestToken123";
+        const string subB = "https://b.example.net/sub/TestToken123";
+        var subs = new List<SubscriptionEntry>
+        {
+            new() { Url = subA, Title = "Provider A" },
+            new() { Url = subB, Title = "" }
+        };
+        ProxyItem S(string name, string sub = "", bool fav = false) => new()
+        {
+            Name = name, Host = "203.0.113.1", Port = 443, Protocol = ProxyProtocol.Vless,
+            IsFromSubscription = sub.Length > 0, SubscriptionUrl = sub, IsFavorite = fav
+        };
+        var manual = S("Мой сервер");
+        var a1 = S("🇩🇪 Германия N1", subA);
+        var a2 = S("🇵🇱 Польша N1", subA, fav: true);
+        var aDiv = S("❗️Белые списки ниже", subA);
+        var a3 = S("🇨🇾 Белый список N3", subA);
+        var b1 = S("🇫🇮 Финляндия", subB);
+        var list = new List<ProxyItem> { manual, a1, a2, aDiv, a3, b1 };
+
+        var sections = ServerListViewModel.BuildSections(list, subs);
+        Assert(sections.Select(s => s.Key).SequenceEqual(new[] { "fav", "sub:" + subs[0].Id, "sub:" + subs[1].Id, "manual" }),
+            $"Sections: favourites, each subscription in order, manual (got {string.Join(",", sections.Select(s => s.Title))})");
+        Assert(sections[0].Members.SequenceEqual(new[] { a2 }), "A favourite is shown only under «Избранное»");
+        Assert(sections[1].Title == "Provider A", "A subscription section is titled with the provider's name");
+        Assert(sections[1].Members.SequenceEqual(new[] { a1, aDiv, a3 }), "Inside a subscription the saved order is kept, divider included");
+        Assert(sections[2].Title == MainViewModel.SubscriptionDisplayName("", subB), "Without a title the subscription's usual display name is used");
+        Assert(sections[3].Title == "Добавлены вручную" && sections[3].Members.SequenceEqual(new[] { manual }), "Manual servers come last");
+
+        var onlyManual = ServerListViewModel.BuildSections(new[] { manual }, subs);
+        Assert(onlyManual.Count == 1, "Empty sections are dropped");
+
+        var onlyDivider = ServerListViewModel.BuildSections(new[] { manual, aDiv }, subs);
+        Assert(onlyDivider.All(s => s.Key != "sub:" + subs[0].Id), "A section holding only a divider is dropped");
+
+        var orphan = S("🇺🇸 США", "https://gone.example.net/sub/TestToken123");
+        var withOrphan = ServerListViewModel.BuildSections(new[] { orphan, manual }, subs);
+        Assert(withOrphan.Any(s => s.Key == "orphan" && s.Members.Contains(orphan)), "Servers of a removed subscription are still listed");
+
+        var candidates = FailoverPlanner.OrderCandidates(a1, list, 10);
+        Assert(!candidates.Contains(aDiv), "Failover never picks a divider");
+    }
+
+    static void TestQuicProtocols()
+    {
+        Console.WriteLine("\n--- 28. Hysteria2 and TUIC ---");
+
+        var hy = ProxyParser.ParseSingle("hysteria2://p%40ss@hy.example.net:8443/?sni=cdn.example.net&obfs=salamander&obfs-password=ObfsPass&insecure=1&mport=20000-30000#%F0%9F%87%A9%F0%9F%87%AA%20Hy2");
+        Assert(hy?.Protocol == ProxyProtocol.Hysteria2, "Parse hysteria2://");
+        Assert(hy?.Password == "p@ss" && hy.Host == "hy.example.net" && hy.Port == 8443, "Hysteria2 password, host and port");
+        Assert(hy?.Sni == "cdn.example.net" && hy.ObfsPassword == "ObfsPass" && hy.Insecure, "Hysteria2 SNI, obfuscation, insecure");
+        Assert(hy?.ServerPorts == "8443,20000-30000", $"Hysteria2 port hopping kept (got '{hy?.ServerPorts}')");
+        Assert(hy?.CleanName == "Hy2", "Hysteria2 name from the link");
+        Assert(hy?.ProtocolBadge == "Hysteria2", "Hysteria2 badge");
+
+        var hy2 = ProxyParser.ParseSingle("hy2://secret@[2001:db8::1]:443,5000-6000?sni=a.example.net#Short");
+        Assert(hy2?.Protocol == ProxyProtocol.Hysteria2 && hy2.Host == "2001:db8::1" && hy2.Port == 443, "hy2:// with IPv6 and a port list");
+        Assert(hy2?.ServerPorts == "443,5000-6000", "Port list from the address part");
+        var hyPlain = ProxyParser.ParseSingle("hy2://secret@hy.example.net#Plain");
+        Assert(hyPlain?.Port == 443 && hyPlain.ServerPorts == "" && !hyPlain.Insecure, "No port -> 443, no hopping, certificate checked");
+
+        var tuic = ProxyParser.ParseSingle("tuic://11111111-2222-3333-4444-555555555555:tu%3Apass@tuic.example.net:10443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=tuic.example.net&allow_insecure=0#TUIC%201");
+        Assert(tuic?.Protocol == ProxyProtocol.Tuic, "Parse tuic://");
+        Assert(tuic?.Uuid == "11111111-2222-3333-4444-555555555555" && tuic.Password == "tu:pass", "TUIC UUID and password");
+        Assert(tuic?.Port == 10443 && tuic.CongestionControl == "bbr" && tuic.UdpRelayMode == "native" && !tuic.Insecure, "TUIC options");
+        Assert(tuic?.ProtocolBadge == "TUIC", "TUIC badge");
+        Assert(ProxyParser.ParseSingle("tuic://only-uuid@tuic.example.net:443") == null, "TUIC without a password is rejected");
+
+        // Share links survive a round trip
+        var hyBack = ProxyParser.ParseSingle(hy!.ToShareableUrl());
+        Assert(hyBack != null && hyBack.Password == hy.Password && hyBack.ObfsPassword == hy.ObfsPassword &&
+               hyBack.ServerPorts == hy.ServerPorts && hyBack.Insecure && hyBack.Sni == hy.Sni && hyBack.Port == hy.Port,
+               $"Hysteria2 share link round trip ({hy.ToShareableUrl()})");
+        var tuicBack = ProxyParser.ParseSingle(tuic!.ToShareableUrl());
+        Assert(tuicBack != null && tuicBack.Uuid == tuic.Uuid && tuicBack.Password == tuic.Password &&
+               tuicBack.CongestionControl == "bbr" && tuicBack.Sni == tuic.Sni, $"TUIC share link round trip ({tuic.ToShareableUrl()})");
+
+        // Subscriptions in sing-box JSON
+        string json = """
+        {"outbounds":[
+          {"type":"hysteria2","tag":"HY","server":"hy.example.net","server_port":443,"password":"pw",
+           "server_ports":["20000:30000"],"obfs":{"type":"salamander","password":"ob"},"tls":{"enabled":true,"insecure":true,"server_name":"s.example.net"}},
+          {"type":"tuic","tag":"TU","server":"tu.example.net","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","password":"pw2",
+           "congestion_control":"cubic","tls":{"enabled":true,"alpn":["h3"]}}
+        ]}
+        """;
+        var fromJson = ProxyParser.ParseJsonSubscription(json);
+        Assert(fromJson.Count == 2, "Both QUIC servers read from a sing-box subscription");
+        Assert(fromJson[0].Protocol == ProxyProtocol.Hysteria2 && fromJson[0].Password == "pw" && fromJson[0].ObfsPassword == "ob" &&
+               fromJson[0].ServerPorts == "20000-30000" && fromJson[0].Insecure, "Hysteria2 from JSON");
+        Assert(fromJson[1].Protocol == ProxyProtocol.Tuic && fromJson[1].Uuid.StartsWith("11111111") && fromJson[1].Password == "pw2" &&
+               fromJson[1].CongestionControl == "cubic" && fromJson[1].Alpn == "h3", "TUIC from JSON");
+
+        // Core config
+        var hyOut = TunRoutingEngine.GenerateSingBoxConfig(hy)["outbounds"]!.AsArray().First(o => o!["tag"]!.GetValue<string>() == "proxy-out")!;
+        Assert(hyOut["type"]!.GetValue<string>() == "hysteria2", "Hysteria2 outbound type");
+        Assert(hyOut["obfs"]?["type"]?.GetValue<string>() == "salamander" && hyOut["obfs"]?["password"]?.GetValue<string>() == "ObfsPass", "Salamander obfuscation");
+        Assert(hyOut["server_ports"]!.AsArray().Select(x => x!.GetValue<string>()).SequenceEqual(new[] { "8443:8443", "20000:30000" }), "Port hopping in sing-box form");
+        Assert(hyOut["server_port"] == null, "With port hopping the single port is left out");
+        var plainOut = TunRoutingEngine.GenerateSingBoxConfig(hyPlain!)["outbounds"]!.AsArray().First(o => o!["tag"]!.GetValue<string>() == "proxy-out")!;
+        Assert(plainOut["server_port"]?.GetValue<int>() == 443 && plainOut["server_ports"] == null, "Without hopping: one port");
+        Assert(hyOut["tls"]?["insecure"]?.GetValue<bool>() == true && hyOut["tls"]?["alpn"]?[0]?.GetValue<string>() == "h3", "TLS: insecure from the link, ALPN h3");
+        Assert(hyOut["tls"]?["utls"] == null && hyOut["tcp_keep_alive"] == null, "No uTLS and no TCP keep-alive on QUIC");
+
+        var tuicOut = TunRoutingEngine.GenerateSingBoxConfig(tuic)["outbounds"]!.AsArray().First(o => o!["tag"]!.GetValue<string>() == "proxy-out")!;
+        Assert(tuicOut["type"]!.GetValue<string>() == "tuic" && tuicOut["uuid"]!.GetValue<string>() == tuic.Uuid, "TUIC outbound");
+        Assert(tuicOut["congestion_control"]?.GetValue<string>() == "bbr" && tuicOut["udp_relay_mode"]?.GetValue<string>() == "native", "TUIC options in config");
+        Assert(tuicOut["tls"]?["insecure"]?.GetValue<bool>() == false, "TUIC checks the certificate unless the link says otherwise");
+
+        Assert(TunRoutingEngine.HysteriaPortRanges("443, 20000-30000, bad, 70000, 5-1").SequenceEqual(new[] { "443:443", "20000:30000" }),
+            "Invalid ports and ranges are dropped");
+
+        // UDP servers are not marked offline by a TCP check
+        var udpCheck = new ProxyItem { Protocol = ProxyProtocol.Hysteria2, Host = "127.0.0.1", Port = 1, Status = ProxyStatus.Online };
+        ProxyCheckerService.FastPingProxyAsync(udpCheck).GetAwaiter().GetResult();
+        Assert(udpCheck.Status == ProxyStatus.Unknown, "A Hysteria2 server is not marked offline by the TCP check");
+
+        foreach (var (label, p) in new[] { ("Hysteria2", hy), ("Hysteria2 without extras", hyPlain!), ("TUIC", tuic) })
+        {
+            if (!File.Exists(TunRoutingEngine.SingBoxExePath)) break;
+            string tmp = Path.Combine(Path.GetTempPath(), $"singbox_quic_{Guid.NewGuid():N}.json");
+            try
+            {
+                File.WriteAllText(tmp, TunRoutingEngine.GenerateSingBoxConfig(p, blockQuic: true).ToJsonString());
+                var psi = new ProcessStartInfo(TunRoutingEngine.SingBoxExePath, $"check -c \"{tmp}\"")
+                {
+                    RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi)!;
+                string err = proc.StandardError.ReadToEnd() + proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                Assert(proc.ExitCode == 0, $"Native sing-box check passes for {label}", err);
+            }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
     }
 
     static void TestFavorites()

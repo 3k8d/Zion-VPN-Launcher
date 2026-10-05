@@ -31,7 +31,14 @@ public class ProxyItem : INotifyPropertyChanged
     public string Name
     {
         get => _name;
-        set => SetField(ref _name, value);
+        set
+        {
+            if (SetField(ref _name, value))
+            {
+                OnPropertyChanged(nameof(CleanName));
+                OnPropertyChanged(nameof(DisplayName));
+            }
+        }
     }
 
     public string Host
@@ -199,12 +206,82 @@ public class ProxyItem : INotifyPropertyChanged
     public string RawLink { get => _rawLink; set => SetField(ref _rawLink, value); }
     public int AlterId { get => _alterId; set => SetField(ref _alterId, value); }
 
+    // Hysteria2 / TUIC (both run over QUIC, i.e. UDP)
+    private string _obfsPassword = "";
+    private string _serverPorts = "";
+    private bool _insecure;
+    private string _congestionControl = "";
+    private string _udpRelayMode = "";
+
+    /// <summary>Hysteria2 "salamander" obfuscation password; empty = no obfuscation.</summary>
+    public string ObfsPassword { get => _obfsPassword; set => SetField(ref _obfsPassword, value); }
+    /// <summary>Hysteria2 port hopping, as in links: "20000-30000" or "443,20000-30000".</summary>
+    public string ServerPorts { get => _serverPorts; set => SetField(ref _serverPorts, value); }
+    /// <summary>Accept the server's certificate without checking it (self-signed Hysteria2/TUIC servers).</summary>
+    public bool Insecure { get => _insecure; set => SetField(ref _insecure, value); }
+    /// <summary>TUIC: bbr, cubic or new_reno; empty = the core's default.</summary>
+    public string CongestionControl { get => _congestionControl; set => SetField(ref _congestionControl, value); }
+    /// <summary>TUIC: native or quic; empty = the core's default.</summary>
+    public string UdpRelayMode { get => _udpRelayMode; set => SetField(ref _udpRelayMode, value); }
+
+    /// <summary>Hysteria2 and TUIC talk to the server over UDP, so a TCP check says nothing about them.</summary>
+    [JsonIgnore]
+    public bool UsesUdpTransport => Protocol is ProxyProtocol.Hysteria2 or ProxyProtocol.Tuic;
+
     [JsonIgnore]
     public bool IsSelected
     {
         get => _isSelected;
         set => SetField(ref _isSelected, value);
     }
+
+    /// <summary>
+    /// The name without the flag emoji in front ("🇬🇧 Великобритания N1" -> "Великобритания N1"):
+    /// the flag is already drawn next to it, and Windows shows emoji flags as two plain letters.
+    /// </summary>
+    [JsonIgnore]
+    public string CleanName
+    {
+        get
+        {
+            string name = Name ?? "";
+            var sb = new System.Text.StringBuilder(name.Length);
+            for (int i = 0; i < name.Length; i++)
+            {
+                if (char.IsSurrogatePair(name, i))
+                {
+                    int cp = char.ConvertToUtf32(name, i);
+                    if (cp is >= 0x1F1E6 and <= 0x1F1FF) { i++; continue; } // regional indicator (flag half)
+                }
+                sb.Append(name[i]);
+            }
+            string rest = System.Text.RegularExpressions.Regex.Replace(sb.ToString(), @"\s{2,}", " ").Trim();
+            return rest.Length > 0 ? rest : CleanCountryName;
+        }
+    }
+
+    private static readonly string[] DividerMarks = { "❗", "❕", "‼", "⚠", "ℹ", "📢", "📌", "🔻", "🔽", "⬇", "⬆", "➖", "—", "–", "═", "━", "─", "=", "#", "•", "*" };
+    private static readonly string[] DividerWords = { "ниже", "выше", "below", "above", "раздел", "section" };
+
+    /// <summary>
+    /// A fake entry some providers put into the list as a section title ("❗️Белые списки ниже").
+    /// Recognised only when it both starts with such a mark and speaks of what is below/above,
+    /// so an ordinary server is never mistaken for one.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsDivider
+    {
+        get
+        {
+            string name = (Name ?? "").Trim();
+            return DividerMarks.Any(m => name.StartsWith(m, StringComparison.Ordinal)) &&
+                   DividerWords.Any(w => name.Contains(w, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    /// <summary>The divider's text without its leading marks ("Белые списки ниже").</summary>
+    [JsonIgnore]
+    public string DividerTitle => (Name ?? "").TrimStart(DividerMarks.SelectMany(m => m).Concat(new[] { '\uFE0F', ' ' }).ToArray()).Trim();
 
     private bool _isFavorite;
     /// <summary>Marked with a star by the user: shown first in the list and tried first on failover.</summary>
@@ -267,6 +344,8 @@ public class ProxyItem : INotifyPropertyChanged
                     _ => "VMess"
                 },
                 ProxyProtocol.Socks5 => "SOCKS5",
+                ProxyProtocol.Hysteria2 => "Hysteria2",
+                ProxyProtocol.Tuic => "TUIC",
                 _ => "HTTP"
             };
         }
@@ -729,6 +808,33 @@ public class ProxyItem : INotifyPropertyChanged
             string base64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(jsonStr));
             return $"vmess://{base64}";
         }
+        else if (Protocol == ProxyProtocol.Hysteria2)
+        {
+            var q = new List<string>();
+            if (!string.IsNullOrEmpty(Sni)) q.Add($"sni={Uri.EscapeDataString(Sni)}");
+            if (!string.IsNullOrEmpty(ObfsPassword))
+            {
+                q.Add("obfs=salamander");
+                q.Add($"obfs-password={Uri.EscapeDataString(ObfsPassword)}");
+            }
+            if (!string.IsNullOrEmpty(ServerPorts)) q.Add($"mport={Uri.EscapeDataString(ServerPorts)}");
+            if (Insecure) q.Add("insecure=1");
+            string query = q.Count > 0 ? "?" + string.Join("&", q) : "";
+            string tag = !string.IsNullOrEmpty(Name) ? "#" + Uri.EscapeDataString(Name) : "";
+            return $"hysteria2://{Uri.EscapeDataString(Password)}@{CleanHost}:{Port}/{query}{tag}";
+        }
+        else if (Protocol == ProxyProtocol.Tuic)
+        {
+            var q = new List<string>();
+            if (!string.IsNullOrEmpty(Sni)) q.Add($"sni={Uri.EscapeDataString(Sni)}");
+            if (!string.IsNullOrEmpty(CongestionControl)) q.Add($"congestion_control={Uri.EscapeDataString(CongestionControl)}");
+            if (!string.IsNullOrEmpty(UdpRelayMode)) q.Add($"udp_relay_mode={Uri.EscapeDataString(UdpRelayMode)}");
+            if (!string.IsNullOrEmpty(Alpn)) q.Add($"alpn={Uri.EscapeDataString(Alpn)}");
+            if (Insecure) q.Add("allow_insecure=1");
+            string query = q.Count > 0 ? "?" + string.Join("&", q) : "";
+            string tag = !string.IsNullOrEmpty(Name) ? "#" + Uri.EscapeDataString(Name) : "";
+            return $"tuic://{Uuid}:{Uri.EscapeDataString(Password)}@{CleanHost}:{Port}{query}{tag}";
+        }
         else if (Protocol == ProxyProtocol.Socks5)
         {
             string auth = !string.IsNullOrEmpty(Username) ? $"{Uri.EscapeDataString(Username)}:{Uri.EscapeDataString(Password)}@" : "";
@@ -751,6 +857,8 @@ public class ProxyItem : INotifyPropertyChanged
             ProxyProtocol.Trojan => $"trojan://{Password.Trim()}@{CleanHost.Trim().ToLowerInvariant()}:{Port}?type={TransportType.Trim().ToLowerInvariant()}&sni={Sni.Trim().ToLowerInvariant()}&path={WsPath.Trim()}&serviceName={GrpcServiceName.Trim()}",
             ProxyProtocol.Shadowsocks => $"ss://{Security.Trim().ToLowerInvariant()}:{Password.Trim()}@{CleanHost.Trim().ToLowerInvariant()}:{Port}",
             ProxyProtocol.Vmess => $"vmess://{Uuid.Trim().ToLowerInvariant()}@{CleanHost.Trim().ToLowerInvariant()}:{Port}?net={TransportType.Trim().ToLowerInvariant()}&type={WsPath.Trim()}&tls={Security.Trim().ToLowerInvariant()}&sni={Sni.Trim().ToLowerInvariant()}",
+            ProxyProtocol.Hysteria2 => $"hysteria2://{Password.Trim()}@{CleanHost.Trim().ToLowerInvariant()}:{Port}?ports={ServerPorts.Trim()}&sni={Sni.Trim().ToLowerInvariant()}&obfs={ObfsPassword.Trim()}",
+            ProxyProtocol.Tuic => $"tuic://{Uuid.Trim().ToLowerInvariant()}:{Password.Trim()}@{CleanHost.Trim().ToLowerInvariant()}:{Port}?sni={Sni.Trim().ToLowerInvariant()}",
             _ => $"{Protocol}://{Username.Trim().ToLowerInvariant()}@{CleanHost.Trim().ToLowerInvariant()}:{Port}"
         };
     }

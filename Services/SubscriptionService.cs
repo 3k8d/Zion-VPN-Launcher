@@ -223,6 +223,15 @@ public static class SubscriptionService
             existing.Username = fresh.Username;
             existing.Password = fresh.Password;
             existing.AlterId = fresh.AlterId;
+            existing.Flow = fresh.Flow;
+            existing.SpiderX = fresh.SpiderX;
+            existing.Alpn = fresh.Alpn;
+            existing.RawLink = fresh.RawLink;
+            existing.ObfsPassword = fresh.ObfsPassword;
+            existing.ServerPorts = fresh.ServerPorts;
+            existing.Insecure = fresh.Insecure;
+            existing.CongestionControl = fresh.CongestionControl;
+            existing.UdpRelayMode = fresh.UdpRelayMode;
             existing.IsFromSubscription = true;
             existing.SubscriptionUrl = url;
             if (!string.IsNullOrWhiteSpace(fresh.Country))

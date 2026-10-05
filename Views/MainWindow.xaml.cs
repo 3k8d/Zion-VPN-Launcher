@@ -606,6 +606,15 @@ public partial class MainWindow : Window
                     EditSniTextBox.Text = p.Sni;
                     EditServiceOrPathTextBox.Text = p.TransportType == "grpc" ? p.GrpcServiceName : p.WsPath;
                 }
+                else if (p.UsesUdpTransport)
+                {
+                    EditTuicUuidTextBox.Text = p.Uuid;
+                    EditQuicPasswordTextBox.Text = p.Password;
+                    EditQuicSniTextBox.Text = p.Sni;
+                    EditObfsPasswordTextBox.Text = p.ObfsPassword;
+                    EditHopPortsTextBox.Text = p.ServerPorts;
+                    SelectComboItem(EditCongestionComboBox, !string.IsNullOrEmpty(p.CongestionControl) ? p.CongestionControl : "bbr");
+                }
                 else
                 {
                     EditUserTextBox.Text = p.Username;
@@ -632,6 +641,12 @@ public partial class MainWindow : Window
                 EditServiceOrPathTextBox.Text = "";
                 EditUserTextBox.Text = "";
                 EditPassTextBox.Text = "";
+                EditTuicUuidTextBox.Text = "";
+                EditQuicPasswordTextBox.Text = "";
+                EditQuicSniTextBox.Text = "";
+                EditObfsPasswordTextBox.Text = "";
+                EditHopPortsTextBox.Text = "";
+                SelectComboItem(EditCongestionComboBox, "BBR");
                 EditQuickInputTextBox.Text = "";
             }
 
@@ -673,8 +688,17 @@ public partial class MainWindow : Window
                            val.Equals("Trojan", StringComparison.OrdinalIgnoreCase) ||
                            val.Equals("VMess", StringComparison.OrdinalIgnoreCase);
 
+        bool isHysteria = val.Equals("Hysteria2", StringComparison.OrdinalIgnoreCase);
+        bool isTuic = val.Equals("TUIC", StringComparison.OrdinalIgnoreCase);
+        bool isQuic = isHysteria || isTuic;
+
         EditVlessPanel.Visibility = isVlessLike ? Visibility.Visible : Visibility.Collapsed;
-        EditAuthPanel.Visibility = isVlessLike ? Visibility.Collapsed : Visibility.Visible;
+        EditAuthPanel.Visibility = isVlessLike || isQuic ? Visibility.Collapsed : Visibility.Visible;
+        EditQuicPanel.Visibility = isQuic ? Visibility.Visible : Visibility.Collapsed;
+        EditTuicUuidPanel.Visibility = isTuic ? Visibility.Visible : Visibility.Collapsed;
+        EditCongestionPanel.Visibility = isTuic ? Visibility.Visible : Visibility.Collapsed;
+        EditObfsPanel.Visibility = isHysteria ? Visibility.Visible : Visibility.Collapsed;
+        EditHopPortsPanel.Visibility = isHysteria ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void EditHostTextBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -796,6 +820,8 @@ public partial class MainWindow : Window
             "TROJAN" => ProxyProtocol.Trojan,
             "SHADOWSOCKS" => ProxyProtocol.Shadowsocks,
             "VMESS" => ProxyProtocol.Vmess,
+            "HYSTERIA2" => ProxyProtocol.Hysteria2,
+            "TUIC" => ProxyProtocol.Tuic,
             "SOCKS5" => ProxyProtocol.Socks5,
             _ => ProxyProtocol.Http
         };
@@ -860,6 +886,24 @@ public partial class MainWindow : Window
             else
                 proxy.WsPath = sp;
         }
+        else if (proxy.UsesUdpTransport)
+        {
+            proxy.Security = "tls";
+            proxy.TransportType = "";
+            proxy.Fingerprint = "";
+            proxy.Password = EditQuicPasswordTextBox.Text.Trim();
+            proxy.Sni = EditQuicSniTextBox.Text.Trim();
+            if (proto == ProxyProtocol.Tuic)
+            {
+                proxy.Uuid = EditTuicUuidTextBox.Text.Trim();
+                proxy.CongestionControl = (EditCongestionComboBox.SelectedItem as ComboBoxItem)?.Content.ToString()?.ToLowerInvariant() ?? "bbr";
+            }
+            else
+            {
+                proxy.ObfsPassword = EditObfsPasswordTextBox.Text.Trim();
+                proxy.ServerPorts = EditHopPortsTextBox.Text.Trim();
+            }
+        }
         else
         {
             proxy.Username = EditUserTextBox.Text.Trim();
@@ -875,6 +919,9 @@ public partial class MainWindow : Window
             proxy.SpiderX = source.SpiderX;
             proxy.Alpn = source.Alpn;
             proxy.RawLink = source.RawLink;
+            // Not in the form: kept from the link or the saved server
+            proxy.Insecure = source.Insecure;
+            proxy.UdpRelayMode = source.UdpRelayMode;
         }
 
         return proxy;
@@ -958,6 +1005,11 @@ public partial class MainWindow : Window
             _vm.EditingProxy.Alpn = built.Alpn;
             _vm.EditingProxy.Username = built.Username;
             _vm.EditingProxy.Password = built.Password;
+            _vm.EditingProxy.ObfsPassword = built.ObfsPassword;
+            _vm.EditingProxy.ServerPorts = built.ServerPorts;
+            _vm.EditingProxy.Insecure = built.Insecure;
+            _vm.EditingProxy.CongestionControl = built.CongestionControl;
+            _vm.EditingProxy.UdpRelayMode = built.UdpRelayMode;
 
             _vm.SelectProxy(_vm.EditingProxy);
             _vm.SaveConfig();

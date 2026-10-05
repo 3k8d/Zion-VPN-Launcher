@@ -45,6 +45,16 @@ public static class ProxyCheckerService
                 return;
             }
 
+            // Hysteria2 / TUIC listen on UDP only: a TCP connect would fail even on a healthy server,
+            // and a QUIC handshake from here would be its own fingerprint. The name resolves - that's all we know.
+            if (proxy.UsesUdpTransport)
+            {
+                proxy.Status = ProxyStatus.Unknown;
+                proxy.PingMs = -1;
+                proxy.LastChecked = DateTime.Now;
+                return;
+            }
+
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
 
             // While the tunnel is up an ordinary socket would be answered by the tunnel itself (a fake 0 ms).

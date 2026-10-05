@@ -8,7 +8,9 @@ public enum ProxyProtocol
     Vless,
     Trojan,
     Shadowsocks,
-    Vmess
+    Vmess,
+    Hysteria2,
+    Tuic
 }
 
 public enum ProxyStatus

@@ -218,7 +218,7 @@ public class MainViewModel : INotifyPropertyChanged
     public string ProtocolBadge => SelectedProxy?.ProtocolBadge ?? "VLESS";
 
     // Server card on the dashboard
-    public string ServerCardSubtitle => SelectedProxy?.DisplayName ?? "Выберите сервер";
+    public string ServerCardSubtitle => SelectedProxy?.CleanName ?? "Выберите сервер";
     public string ServerCardBadge => ProtocolBadge;
     public string ServerCardCountry => SelectedProxy?.Country ?? "";
 
@@ -453,18 +453,6 @@ public class MainViewModel : INotifyPropertyChanged
         _logEntries.Add($"[{DateTime.Now:HH:mm:ss}] {line}");
     }
 
-    private bool _autoStartWithWindows;
-    public bool AutoStartWithWindows
-    {
-        get => _autoStartWithWindows;
-        set
-        {
-            if (SetField(ref _autoStartWithWindows, value))
-            {
-                AutoStartService.SetAutoStart(value);
-            }
-        }
-    }
 
     public ICommand CopyLogsCommand { get; }
 
@@ -682,7 +670,7 @@ public class MainViewModel : INotifyPropertyChanged
         _blockTrackers = config.BlockTrackers;
         _killSwitch = config.KillSwitch;
         _controller.KillSwitchEnabled = _killSwitch;
-        _autoStartWithWindows = AutoStartService.IsAutoStartEnabled();
+        AutoStartService.RemoveLegacyEntry(); // the feature is gone; its old Run entry never worked
 
         DismissToastCommand = new RelayCommand(_ => IsToastVisible = false);
         _toastTimer.Tick += (_, _) => { _toastTimer.Stop(); IsToastVisible = false; };
@@ -1080,7 +1068,7 @@ public class MainViewModel : INotifyPropertyChanged
         try
         {
             var failed = SelectedProxy;
-            string failedName = failed?.DisplayName ?? "Сервер";
+            string failedName = failed?.CleanName ?? "Сервер";
 
             // Another server cannot help when the network itself is down
             if (await InternetProbe.IsInternetReachableAsync() == false)
@@ -1102,13 +1090,13 @@ public class MainViewModel : INotifyPropertyChanged
             {
                 if (!_userWantsConnection) return;
 
-                AddLog($"Автопереключение: пробуем «{next.DisplayName}».");
+                AddLog($"Автопереключение: пробуем «{next.CleanName}».");
                 SelectedProxy = next;
 
                 bool ok = await _controller.ReconnectAsync(next, BypassTorrents, BypassDomesticRu, SelectedDns, BlockQuic, BlockWebRtc, BlockTrackers);
                 if (ok)
                 {
-                    ShowToast($"«{failedName}» не отвечает. Переключено на «{next.DisplayName}».");
+                    ShowToast($"«{failedName}» не отвечает. Переключено на «{next.CleanName}».");
                     return;
                 }
             }
@@ -1278,7 +1266,7 @@ public class MainViewModel : INotifyPropertyChanged
 
         if (current != null && IsConnected)
         {
-            ShowToast($"«{current.DisplayName}» больше нет в подписке. Переключено на «{next.DisplayName}».");
+            ShowToast($"«{current.CleanName}» больше нет в подписке. Переключено на «{next.CleanName}».");
             SelectProxy(next); // reconnects
         }
         else
@@ -1321,7 +1309,7 @@ public class MainViewModel : INotifyPropertyChanged
 
         AddLog(keep == null
             ? $"Удалены все серверы ({snapshot.RemovedCount})."
-            : $"Удалены все серверы ({snapshot.RemovedCount}), кроме текущего «{keep.DisplayName}».");
+            : $"Удалены все серверы ({snapshot.RemovedCount}), кроме текущего «{keep.CleanName}».");
         return snapshot;
     }
 

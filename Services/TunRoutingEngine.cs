@@ -1298,6 +1298,10 @@ public class TunRoutingEngine
                 };
             }
         }
+        else if (proxy.Protocol is ProxyProtocol.Hysteria2 or ProxyProtocol.Tuic)
+        {
+            proxyOutbound = BuildQuicOutbound(proxy, host, port);
+        }
         else if (proxy.Protocol == ProxyProtocol.Socks5)
         {
             proxyOutbound = new JsonObject
@@ -1329,8 +1333,11 @@ public class TunRoutingEngine
             }
         }
 
-        proxyOutbound["tcp_keep_alive"] = "15s";
-        proxyOutbound["tcp_keep_alive_interval"] = "15s";
+        if (!proxy.UsesUdpTransport)
+        {
+            proxyOutbound["tcp_keep_alive"] = "15s";
+            proxyOutbound["tcp_keep_alive_interval"] = "15s";
+        }
 
         config["outbounds"] = new JsonArray
         {
@@ -1339,6 +1346,92 @@ public class TunRoutingEngine
         };
 
         return config;
+    }
+
+    /// <summary>
+    /// Hysteria2 / TUIC outbound. Both run over QUIC: TLS is always on, ALPN is h3 unless the link says
+    /// otherwise, and there is no uTLS (it exists only for TCP handshakes).
+    /// </summary>
+    private static JsonObject BuildQuicOutbound(ProxyItem proxy, string host, int port)
+    {
+        var alpn = new JsonArray();
+        string alpnText = !string.IsNullOrWhiteSpace(proxy.Alpn) ? proxy.Alpn : "h3";
+        foreach (var a in alpnText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            alpn.Add(a);
+
+        var tls = new JsonObject
+        {
+            ["enabled"] = true,
+            ["server_name"] = !string.IsNullOrEmpty(proxy.Sni) ? proxy.Sni : host,
+            ["insecure"] = proxy.Insecure,
+            ["alpn"] = alpn
+        };
+
+        if (proxy.Protocol == ProxyProtocol.Hysteria2)
+        {
+            var outbound = new JsonObject
+            {
+                ["type"] = "hysteria2",
+                ["tag"] = "proxy-out",
+                ["server"] = host,
+                ["server_port"] = port,
+                ["password"] = proxy.Password ?? ""
+            };
+
+            var ranges = HysteriaPortRanges(proxy.ServerPorts);
+            if (ranges.Count > 0)
+            {
+                // Port hopping: the list replaces the single port (sing-box treats the two as conflicting)
+                var arr = new JsonArray();
+                foreach (var r in ranges) arr.Add(r);
+                outbound.Remove("server_port");
+                outbound["server_ports"] = arr;
+            }
+
+            if (!string.IsNullOrEmpty(proxy.ObfsPassword))
+            {
+                outbound["obfs"] = new JsonObject { ["type"] = "salamander", ["password"] = proxy.ObfsPassword };
+            }
+
+            outbound["tls"] = tls;
+            return outbound;
+        }
+
+        var tuic = new JsonObject
+        {
+            ["type"] = "tuic",
+            ["tag"] = "proxy-out",
+            ["server"] = host,
+            ["server_port"] = port,
+            ["uuid"] = proxy.Uuid ?? "",
+            ["password"] = proxy.Password ?? ""
+        };
+        if (proxy.CongestionControl is "bbr" or "cubic" or "new_reno") tuic["congestion_control"] = proxy.CongestionControl;
+        if (proxy.UdpRelayMode is "native" or "quic") tuic["udp_relay_mode"] = proxy.UdpRelayMode;
+        tuic["tls"] = tls;
+        return tuic;
+    }
+
+    /// <summary>
+    /// Link-style port list ("443,20000-30000") to sing-box ranges ("443:443", "20000:30000").
+    /// Anything that is not a valid port or range is dropped.
+    /// </summary>
+    public static List<string> HysteriaPortRanges(string? spec)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(spec)) return result;
+
+        foreach (var token in spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = token.Split('-', ':');
+            if (parts.Length == 1 && int.TryParse(parts[0], out int single) && single is > 0 and <= 65535)
+                result.Add($"{single}:{single}");
+            else if (parts.Length == 2 && int.TryParse(parts[0], out int from) && int.TryParse(parts[1], out int to) &&
+                     from is > 0 and <= 65535 && to is > 0 and <= 65535 && from <= to)
+                result.Add($"{from}:{to}");
+        }
+
+        return result.Distinct().ToList();
     }
 
     /// <summary>
