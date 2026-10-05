@@ -17,10 +17,10 @@ VPN client for Windows built on [sing-box](https://github.com/SagerNet/sing-box)
 
 ## Screenshots
 
-| | | |
-|---|---|---|
-| ![Disconnected](docs/screenshots/disconnected.png) | ![Subscriptions](docs/screenshots/subscriptions.png) | ![Settings](docs/screenshots/settings.png) |
-| ![Programs bypassing the VPN](docs/screenshots/exclusions.png) | ![DNS](docs/screenshots/dns.png) | ![Clear the server list](docs/screenshots/clear-list.png) |
+| | | | |
+|---|---|---|---|
+| ![Disconnected](docs/screenshots/disconnected.png) | ![Servers](docs/screenshots/servers.png) | ![DNS](docs/screenshots/dns.png) | ![Subscriptions](docs/screenshots/subscriptions.png) |
+| ![Settings](docs/screenshots/settings.png) | ![Programs bypassing the VPN](docs/screenshots/exclusions.png) | ![Sites bypassing the VPN](docs/screenshots/sites.png) | ![Clear the server list](docs/screenshots/clear-list.png) |
 
 ## Download
 
