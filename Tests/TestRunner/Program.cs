@@ -61,6 +61,7 @@ class Program
         TestVlessTlsHandshake();
         TestDnsFailover();
         TestDirectSites();
+        TestFavorites();
 
         Console.WriteLine("\n=======================================================");
         Console.WriteLine($"RESULTS: {_passed} Passed, {_failed} Failed");
@@ -999,6 +1000,35 @@ class Program
         Assert(expired.Text.StartsWith("истекла") && expired.IsWarning, "Expired subscription is highlighted");
         Assert(SubscriptionsViewModel.Servers(1) == "1 сервер" && SubscriptionsViewModel.Servers(3) == "3 сервера" && SubscriptionsViewModel.Servers(11) == "11 серверов" && SubscriptionsViewModel.Servers(24) == "24 сервера", "Russian plural forms");
         Assert(SubscriptionsViewModel.When(day.AddHours(-2), day) == "сегодня в 10:00" && SubscriptionsViewModel.When(day.AddDays(-1), day) == "вчера в 12:00", "Update time wording");
+    }
+
+    static void TestFavorites()
+    {
+        Console.WriteLine("\n--- 26. Favourite servers ---");
+        ProxyItem S(string name, bool fav = false, int ping = 50) => new() { Name = name, Host = $"{name}.example.net", Port = 443, IsFavorite = fav, PingMs = ping };
+
+        // List order: favourites first, the saved order kept inside each group
+        var a = S("🇩🇪 a"); var b = S("🇳🇱 b", fav: true); var c = S("🇫🇮 c"); var d = S("🇺🇸 d", fav: true);
+        var shown = ServerListViewModel.FavoritesFirst(new[] { a, b, c, d });
+        Assert(shown.SequenceEqual(new[] { b, d, a, c }), "Favourites come first, saved order kept inside each group");
+        Assert(ServerListViewModel.FavoritesFirst(new[] { a, c }).SequenceEqual(new[] { a, c }), "Without favourites the order is unchanged");
+
+        // Failover: same country still wins, then favourites, then ping
+        var cur = S("🇩🇪 current");
+        var deFast = S("🇩🇪 fast", ping: 20); var deFav = S("🇩🇪 starred", fav: true, ping: 300); var nlFav = S("🇳🇱 starred", fav: true, ping: 10);
+        var order = FailoverPlanner.OrderCandidates(cur, new[] { deFast, nlFav, deFav, cur });
+        Assert(order[0] == deFav && order[1] == deFast && order[2] == nlFav, "Failover: same country first, a favourite before a faster non-favourite");
+
+        // Kept when the subscription is refreshed, and saved with the settings
+        var list = new System.Collections.ObjectModel.ObservableCollection<ProxyItem>
+        {
+            new() { Name = "A1", Host = "1.0.0.1", Port = 443, Protocol = ProxyProtocol.Vless, Uuid = "a1", IsFromSubscription = true, SubscriptionUrl = "https://s.example.net/x", IsFavorite = true }
+        };
+        SubscriptionService.MergeSubscriptionItems(list, new List<ProxyItem> { new() { Name = "A1 renamed", Host = "1.0.0.1", Port = 443, Protocol = ProxyProtocol.Vless, Uuid = "a1" } }, new AppConfig(), "https://s.example.net/x");
+        Assert(list.Count == 1 && list[0].IsFavorite && list[0].Name == "A1 renamed", "Star survives a subscription update");
+        var json = JsonSerializer.Serialize(new AppConfig { Proxies = list.ToList() });
+        Assert(JsonSerializer.Deserialize<AppConfig>(json)!.Proxies[0].IsFavorite, "Star is saved with the settings");
+        Assert(!new ProxyItem().IsFavorite, "New servers are not favourites");
     }
 
     static void TestDirectSites()

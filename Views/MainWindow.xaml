@@ -1102,7 +1102,7 @@
                 </DockPanel>
 
                 <Grid Grid.Row="1" Margin="0,0,0,10">
-                    <ListBox ItemsSource="{Binding Proxies}"
+                    <ListBox ItemsSource="{Binding ServerListVm.OrderedProxies}"
                              ItemContainerStyle="{StaticResource ModernListBoxItem}"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -1137,6 +1137,36 @@
                                         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                                             <Border Style="{StaticResource Pill}" Margin="0,0,6,0">
                                                 <TextBlock Text="{Binding ProtocolBadge}" FontSize="9" FontWeight="Bold" Foreground="{StaticResource AccentHi}"/>
+                                            </Border>
+
+                                            <!-- Favourite: outline star, filled amber when marked -->
+                                            <Border MouseLeftButtonUp="BtnFavorite_MouseLeftButtonUp">
+                                                <Border.Style>
+                                                    <Style TargetType="Border" BasedOn="{StaticResource RowAction}">
+                                                        <Setter Property="ToolTip" Value="В избранное"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                                <Setter Property="ToolTip" Value="Убрать из избранного"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <Path Width="13" Height="13" Stretch="Uniform" StrokeThickness="1.6" StrokeLineJoin="Round"
+                                                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                      Data="M12 2.5l2.94 5.96 6.58.96-4.76 4.64 1.12 6.55L12 17.52l-5.88 3.09 1.12-6.55L2.48 9.42l6.58-.96z">
+                                                    <Path.Style>
+                                                        <Style TargetType="Path">
+                                                            <Setter Property="Stroke" Value="{StaticResource TextMuted}"/>
+                                                            <Setter Property="Fill" Value="Transparent"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                                    <Setter Property="Stroke" Value="#FBBF24"/>
+                                                                    <Setter Property="Fill" Value="#FBBF24"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Path.Style>
+                                                </Path>
                                             </Border>
 
                                             <Border Style="{StaticResource RowAction}" ToolTip="Редактировать"

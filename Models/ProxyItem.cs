@@ -206,6 +206,14 @@ public class ProxyItem : INotifyPropertyChanged
         set => SetField(ref _isSelected, value);
     }
 
+    private bool _isFavorite;
+    /// <summary>Marked with a star by the user: shown first in the list and tried first on failover.</summary>
+    public bool IsFavorite
+    {
+        get => _isFavorite;
+        set => SetField(ref _isFavorite, value);
+    }
+
     [JsonIgnore]
     public string DisplayName => !string.IsNullOrWhiteSpace(Name) ? Name : CleanCountryName;
 

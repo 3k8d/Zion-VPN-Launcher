@@ -17,6 +17,10 @@ public class ServerListViewModel : INotifyPropertyChanged
 
     public ObservableCollection<ProxyItem> Proxies => _mainVm.Proxies;
 
+    /// <summary>What the list shows: favourites first, then everything else, each in the saved order.</summary>
+    public ObservableCollection<ProxyItem> OrderedProxies { get; } = new();
+
+    public ICommand ToggleFavoriteCommand { get; }
 
     public string UndoMessage
     {
@@ -44,7 +48,54 @@ public class ServerListViewModel : INotifyPropertyChanged
         AskDeleteAllCommand = new RelayCommand(_ => AskDeleteAll(), _ => _mainVm.DeletableProxyCount > 0);
         CancelDeleteAllCommand = new RelayCommand(_ => IsDeleteAllConfirmOpen = false);
         ConfirmDeleteAllCommand = new RelayCommand(_ => ConfirmDeleteAll());
+        ToggleFavoriteCommand = new RelayCommand(p =>
+        {
+            if (p is not ProxyItem proxy) return;
+            proxy.IsFavorite = !proxy.IsFavorite; // the list re-orders itself via the property change
+            _mainVm.SaveConfig();
+        });
 
+        // Keep the shown order in step with the real list and with every star change
+        Proxies.CollectionChanged += (_, e) =>
+        {
+            if (e.OldItems != null) foreach (ProxyItem p in e.OldItems) p.PropertyChanged -= OnProxyChanged;
+            if (e.NewItems != null) foreach (ProxyItem p in e.NewItems) p.PropertyChanged += OnProxyChanged;
+            if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+                foreach (var p in Proxies) { p.PropertyChanged -= OnProxyChanged; p.PropertyChanged += OnProxyChanged; }
+            SyncOrder();
+        };
+        foreach (var p in Proxies) p.PropertyChanged += OnProxyChanged;
+        SyncOrder();
+    }
+
+    private void OnProxyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ProxyItem.IsFavorite)) SyncOrder();
+    }
+
+    /// <summary>Favourites first, then the rest; inside each group the saved order is kept.</summary>
+    public static List<ProxyItem> FavoritesFirst(IEnumerable<ProxyItem> proxies)
+    {
+        var list = proxies.ToList();
+        return list.Where(p => p.IsFavorite).Concat(list.Where(p => !p.IsFavorite)).ToList();
+    }
+
+    /// <summary>Moves items instead of rebuilding, so the list does not jump or lose its scroll position.</summary>
+    private void SyncOrder()
+    {
+        var target = FavoritesFirst(Proxies);
+
+        for (int i = OrderedProxies.Count - 1; i >= 0; i--)
+        {
+            if (!target.Contains(OrderedProxies[i])) OrderedProxies.RemoveAt(i);
+        }
+
+        for (int i = 0; i < target.Count; i++)
+        {
+            int at = OrderedProxies.IndexOf(target[i]);
+            if (at < 0) OrderedProxies.Insert(i, target[i]);
+            else if (at != i) OrderedProxies.Move(at, i);
+        }
     }
 
 

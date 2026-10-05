@@ -518,6 +518,15 @@ public partial class MainWindow : Window
         }
     }
 
+    private void BtnFavorite_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true; // a star click must not also pick the server
+        if ((sender as FrameworkElement)?.DataContext is ProxyItem proxy)
+        {
+            _vm.ServerListVm.ToggleFavoriteCommand.Execute(proxy);
+        }
+    }
+
     private void BtnDeleteServer_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;

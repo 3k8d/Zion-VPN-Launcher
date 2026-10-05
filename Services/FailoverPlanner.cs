@@ -7,7 +7,8 @@ public static class FailoverPlanner
 {
     /// <summary>
     /// Same country as the failed server first (so the exit location changes as little as possible),
-    /// then everything else. Inside each group: servers not known to be offline first, fastest ping first.
+    /// then everything else. Inside each group: the user's favourites first, then servers not known
+    /// to be offline, fastest ping first.
     /// </summary>
     public static List<ProxyItem> OrderCandidates(ProxyItem? current, IEnumerable<ProxyItem> all, int max = 5)
     {
@@ -17,6 +18,7 @@ public static class FailoverPlanner
         return all
             .Where(p => current == null || p.Id != current.Id)
             .OrderBy(p => countryKnown && string.Equals(p.CountryCode, code, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(p => p.IsFavorite ? 0 : 1)
             .ThenBy(p => p.Status == ProxyStatus.Offline ? 1 : 0)
             .ThenBy(p => p.PingMs > 0 ? p.PingMs : int.MaxValue)
             .Take(max)
