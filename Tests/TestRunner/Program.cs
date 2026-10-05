@@ -412,6 +412,13 @@ class Program
         bool hasSingBox = File.Exists(singBoxPath);
         Assert(hasSingBox, $"Native sing-box.exe located at {singBoxPath}");
 
+        // The integrity check streams the files instead of loading them: it must still accept the real core
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var (coreOk, coreError) = TunRoutingEngine.EnsureCoreFiles(forceRecheck: true);
+        long allocatedMb = (GC.GetAllocatedBytesForCurrentThread() - before) / 1048576;
+        Assert(coreOk, "Core files pass the integrity check", coreError);
+        Assert(allocatedMb < 16, $"The integrity check does not copy the 43 MB core into memory (allocated {allocatedMb} MB)");
+
         var testProtocols = new List<(string Name, ProxyItem Proxy)>
         {
             ("VLESS Reality", new ProxyItem

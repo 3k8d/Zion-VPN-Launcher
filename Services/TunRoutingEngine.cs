@@ -230,32 +230,32 @@ public class TunRoutingEngine
         }
     }
 
+    // Integrity checks stream the data in small blocks: the core is ~43 MB, and copying it into memory
+    // (as this code once did) left ~200 MB claimed by the process for the whole session.
+
+    /// <summary>SHA-256 of an embedded resource as it lands on disk (decompressed when it is a .gz).</summary>
+    private static byte[]? ResourceHash(System.Reflection.Assembly assembly, string resourceName, bool isGz)
+    {
+        using var stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream == null) return null;
+        if (!isGz) return SHA256.HashData(stream);
+        using var gz = new GZipStream(stream, CompressionMode.Decompress);
+        return SHA256.HashData(gz);
+    }
+
+    private static byte[] FileHash(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
+        return SHA256.HashData(fs);
+    }
+
     private static bool IsFileIntegrityValid(System.Reflection.Assembly assembly, string resourceName, string filePath, bool isGz)
     {
         try
         {
             if (!File.Exists(filePath)) return false;
-
-            using var stream = assembly.GetManifestResourceStream(resourceName);
-            if (stream == null) return false;
-
-            byte[] expectedHash;
-            using (var ms = new MemoryStream())
-            {
-                if (isGz)
-                {
-                    using var gz = new GZipStream(stream, CompressionMode.Decompress);
-                    gz.CopyTo(ms);
-                }
-                else
-                {
-                    stream.CopyTo(ms);
-                }
-                expectedHash = SHA256.HashData(ms.ToArray());
-            }
-
-            byte[] diskHash = SHA256.HashData(File.ReadAllBytes(filePath));
-            return CryptographicOperations.FixedTimeEquals(expectedHash, diskHash);
+            byte[]? expected = ResourceHash(assembly, resourceName, isGz);
+            return expected != null && CryptographicOperations.FixedTimeEquals(expected, FileHash(filePath));
         }
         catch
         {
@@ -263,50 +263,32 @@ public class TunRoutingEngine
         }
     }
 
+    /// <summary>Writes the resource to a temporary file, checks the file on disk, then moves it into place.</summary>
     private static bool ExtractResourceSafely(System.Reflection.Assembly assembly, string resourceName, string destPath, bool isGz)
     {
         string tempDest = destPath + $".{Guid.NewGuid():N}.tmp";
         try
         {
-            using var stream = assembly.GetManifestResourceStream(resourceName);
-            if (stream == null) return false;
+            byte[]? expected = ResourceHash(assembly, resourceName, isGz);
+            if (expected == null) return false;
 
-            byte[] expectedHash;
-            using (var ms = new MemoryStream())
+            using (var stream = assembly.GetManifestResourceStream(resourceName)!)
+            using (var source = isGz ? new GZipStream(stream, CompressionMode.Decompress) : stream)
+            using (var fs = new FileStream(tempDest, FileMode.Create, FileAccess.Write, FileShare.None, 81920, FileOptions.WriteThrough))
             {
-                if (isGz)
-                {
-                    using var gz = new GZipStream(stream, CompressionMode.Decompress);
-                    gz.CopyTo(ms);
-                }
-                else
-                {
-                    stream.CopyTo(ms);
-                }
-
-                byte[] decompressedBytes = ms.ToArray();
-                expectedHash = SHA256.HashData(decompressedBytes);
-
-                using (var fs = new FileStream(tempDest, FileMode.Create, FileAccess.Write, FileShare.None, 8192, FileOptions.WriteThrough))
-                {
-                    fs.Write(decompressedBytes, 0, decompressedBytes.Length);
-                    fs.Flush(true);
-                }
+                source.CopyTo(fs, 81920);
+                fs.Flush(true);
             }
 
             // Verify SHA-256 on disk before atomic replacement
-            byte[] diskHash = SHA256.HashData(File.ReadAllBytes(tempDest));
-            if (CryptographicOperations.FixedTimeEquals(expectedHash, diskHash))
+            if (!CryptographicOperations.FixedTimeEquals(expected, FileHash(tempDest)))
             {
-                if (File.Exists(destPath)) File.Delete(destPath);
-                File.Move(tempDest, destPath, overwrite: true);
-                return true;
-            }
-            else
-            {
-                try { if (File.Exists(tempDest)) File.Delete(tempDest); } catch { }
+                try { File.Delete(tempDest); } catch { }
                 return false;
             }
+
+            File.Move(tempDest, destPath, overwrite: true);
+            return true;
         }
         catch
         {
@@ -314,7 +296,6 @@ public class TunRoutingEngine
             return false;
         }
     }
-
     public static async Task<(bool valid, string error)> ValidateConfigFileWithNativeSingBoxAsync(string configFilePath, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(SingBoxExePath))

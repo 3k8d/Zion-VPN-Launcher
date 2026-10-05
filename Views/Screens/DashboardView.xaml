@@ -5,6 +5,33 @@
              xmlns:views="clr-namespace:Zion.Views"
              xmlns:controls="clr-namespace:Zion.Views.Controls"
              Style="{StaticResource ScreenHost}">
+    <UserControl.Resources>
+        <!-- The ring breathes while the VPN is connected and the window is in front of the user (see code-behind).
+             30 frames a second: the window is layered, so every frame repaints all of it. -->
+        <Storyboard x:Key="Breathing" RepeatBehavior="Forever" AutoReverse="True" Timeline.DesiredFrameRate="30">
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HaloScale"
+                                           Storyboard.TargetProperty="ScaleX" Duration="0:0:1.6">
+                <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.07" KeySpline="0.4,0.0 0.2,1.0"/>
+            </DoubleAnimationUsingKeyFrames>
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HaloScale"
+                                           Storyboard.TargetProperty="ScaleY" Duration="0:0:1.6">
+                <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.07" KeySpline="0.4,0.0 0.2,1.0"/>
+            </DoubleAnimationUsingKeyFrames>
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="OuterHaloGlowBorder"
+                                           Storyboard.TargetProperty="Opacity" Duration="0:0:1.6">
+                <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="0.9" KeySpline="0.4,0.0 0.2,1.0"/>
+            </DoubleAnimationUsingKeyFrames>
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="BtnBreathingScale"
+                                           Storyboard.TargetProperty="ScaleX" Duration="0:0:1.6">
+                <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.02" KeySpline="0.4,0.0 0.2,1.0"/>
+            </DoubleAnimationUsingKeyFrames>
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="BtnBreathingScale"
+                                           Storyboard.TargetProperty="ScaleY" Duration="0:0:1.6">
+                <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.02" KeySpline="0.4,0.0 0.2,1.0"/>
+            </DoubleAnimationUsingKeyFrames>
+        </Storyboard>
+    </UserControl.Resources>
+
     <UserControl.RenderTransform>
         <TranslateTransform/>
     </UserControl.RenderTransform>
@@ -158,34 +185,6 @@
                     </Button.Template>
                 </Button>
 
-                <Grid.Triggers>
-                    <EventTrigger RoutedEvent="Grid.Loaded">
-                        <BeginStoryboard>
-                            <Storyboard RepeatBehavior="Forever" AutoReverse="True" Timeline.DesiredFrameRate="60">
-                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HaloScale"
-                                                               Storyboard.TargetProperty="ScaleX" Duration="0:0:1.6">
-                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.07" KeySpline="0.4,0.0 0.2,1.0"/>
-                                </DoubleAnimationUsingKeyFrames>
-                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HaloScale"
-                                                               Storyboard.TargetProperty="ScaleY" Duration="0:0:1.6">
-                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.07" KeySpline="0.4,0.0 0.2,1.0"/>
-                                </DoubleAnimationUsingKeyFrames>
-                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="OuterHaloGlowBorder"
-                                                               Storyboard.TargetProperty="Opacity" Duration="0:0:1.6">
-                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="0.9" KeySpline="0.4,0.0 0.2,1.0"/>
-                                </DoubleAnimationUsingKeyFrames>
-                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="BtnBreathingScale"
-                                                               Storyboard.TargetProperty="ScaleX" Duration="0:0:1.6">
-                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.02" KeySpline="0.4,0.0 0.2,1.0"/>
-                                </DoubleAnimationUsingKeyFrames>
-                                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="BtnBreathingScale"
-                                                               Storyboard.TargetProperty="ScaleY" Duration="0:0:1.6">
-                                    <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="1.02" KeySpline="0.4,0.0 0.2,1.0"/>
-                                </DoubleAnimationUsingKeyFrames>
-                            </Storyboard>
-                        </BeginStoryboard>
-                    </EventTrigger>
-                </Grid.Triggers>
             </Grid>
 
             <TextBlock Text="{Binding PowerPromptText}" FontSize="12" FontWeight="SemiBold"
